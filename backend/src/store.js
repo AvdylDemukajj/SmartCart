@@ -317,6 +317,9 @@ export class SmartCartStore {
   retryReceiptOcrJob({ userId, householdId, jobId, traceContext = null }) {
     this.assertMember(userId, householdId);
     const jobs = this.repo.receiptOcrJobs.get(householdId) ?? [];
+  retryReceiptOcrJob({ userId, householdId, jobId }) {
+    this.assertMember(userId, householdId);
+    const jobs = this.receiptOcrJobs.get(householdId) ?? [];
     const job = jobs.find((entry) => entry.jobId === jobId);
     if (!job) throw new Error('OCR_JOB_NOT_FOUND');
     if (!['failed'].includes(job.status)) throw new Error('OCR_JOB_RETRY_NOT_ALLOWED');
