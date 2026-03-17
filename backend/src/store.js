@@ -75,6 +75,21 @@ export class SmartCartStore {
     this.priceRepository = new InMemoryPriceRepository(STARTER_PRICE_BOOK);
     this.receiptUploads = new Map();
     this.receiptOcrJobs = new Map();
+    this.securityAuditLog = [];
+  }
+
+  recordSecurityAudit(event) {
+    this.securityAuditLog.push({
+      id: randomUUID(),
+      ...event,
+      createdAt: new Date().toISOString(),
+    });
+    if (this.securityAuditLog.length > 500) this.securityAuditLog.shift();
+  }
+
+  getSecurityAuditLog({ userId, limit = 100 }) {
+    if (!userId) throw new Error('FORBIDDEN_HOUSEHOLD_ACCESS');
+    return this.securityAuditLog.slice(-Math.max(1, Math.min(500, limit)));
   }
 
   ensureUser(userId) {
@@ -213,7 +228,7 @@ export class SmartCartStore {
     return upload;
   }
 
-  enqueueReceiptOcrJob({ userId, householdId, objectKey }) {
+  enqueueReceiptOcrJob({ userId, householdId, objectKey, apiRequestId = null }) {
     this.assertMember(userId, householdId);
     const job = {
       jobId: randomUUID(),
@@ -227,6 +242,12 @@ export class SmartCartStore {
       result: null,
       error: null,
       correctedResult: null,
+      trace: {
+        apiRequestId,
+        workerRunId: null,
+        workerStartedAt: null,
+        applyRequestId: null,
+      },
     };
     this.receiptOcrJobs.get(householdId).push(job);
     this.pushActivity(householdId, userId, 'receipt.ocr.queued', `${userId} nisi OCR job`);
@@ -246,6 +267,8 @@ export class SmartCartStore {
     job.status = 'processing';
     job.attempts += 1;
     job.updatedAt = new Date().toISOString();
+    job.trace.workerRunId = randomUUID();
+    job.trace.workerStartedAt = new Date().toISOString();
 
     // Simulated OCR engine behavior: object keys containing "fail" will fail.
     const shouldFail = String(job.objectKey || '').toLowerCase().includes('fail');
@@ -325,7 +348,7 @@ export class SmartCartStore {
     return job;
   }
 
-  applyReceiptOcrJobResult({ userId, householdId, jobId }) {
+  applyReceiptOcrJobResult({ userId, householdId, jobId, applyRequestId = null }) {
     this.assertMember(userId, householdId);
     const jobs = this.receiptOcrJobs.get(householdId) ?? [];
     const job = jobs.find((entry) => entry.jobId === jobId);
@@ -341,6 +364,7 @@ export class SmartCartStore {
       items: source.items,
     });
 
+    job.trace.applyRequestId = applyRequestId;
     this.pushActivity(householdId, userId, 'receipt.ocr.applied', `${userId} aplikoi OCR rezultatin`);
     return { job, appliedReceipt: result.receipt, budget: result.budget };
   }
@@ -388,6 +412,18 @@ export class SmartCartStore {
     const result = this.priceRepository.promoteValidated({ actorId });
     this.pricingEstimateCache.clear();
     return result;
+  }
+
+
+  getOcrQueueDepth() {
+    const jobs = Array.from(this.receiptOcrJobs.values()).flat();
+    return {
+      total: jobs.length,
+      queued: jobs.filter((entry) => entry.status === 'queued').length,
+      processing: jobs.filter((entry) => entry.status === 'processing').length,
+      failed: jobs.filter((entry) => entry.status === 'failed').length,
+      deadLetter: jobs.filter((entry) => entry.status === 'dead_letter').length,
+    };
   }
 
   getPricingPipelineStatus() {

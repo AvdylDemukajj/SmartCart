@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto';
 import http from 'node:http';
 import { URL } from 'node:url';
 import { SmartCartStore } from './store.js';
+import { FixedWindowRateLimiter, resolveUserId } from './security.js';
+import { InMemoryTelemetry } from './telemetry.js';
 
 function readBody(req) {
   return new Promise((resolve, reject) => {
@@ -44,17 +46,6 @@ function writeSseEvent(res, event) {
   res.write(`data: ${JSON.stringify(event)}\n\n`);
 }
 
-function parseUserId(req) {
-  const headerUser = req.headers['x-user-id'];
-  if (typeof headerUser === 'string' && headerUser.trim()) return headerUser.trim();
-  const authorization = req.headers.authorization;
-  if (typeof authorization === 'string' && authorization.startsWith('Bearer ')) {
-    const token = authorization.slice('Bearer '.length).trim();
-    if (token.startsWith('dev-user:')) return token.replace('dev-user:', '');
-  }
-  return null;
-}
-
 function assertNonEmptyString(value, fieldName) {
   if (typeof value !== 'string' || !value.trim()) throw new Error(`VALIDATION_${fieldName.toUpperCase()}`);
 }
@@ -77,29 +68,59 @@ function logRequest({ requestId, method, path, userId, status, error }) {
   console.log(JSON.stringify(log));
 }
 
-export function createApp() {
+export function createApp(config = {}) {
   const store = new SmartCartStore();
+  const globalLimiter = new FixedWindowRateLimiter({
+    limit: config.globalRateLimit ?? 120,
+    windowMs: config.globalRateWindowMs ?? 60_000,
+  });
+  const aiLimiter = new FixedWindowRateLimiter({
+    limit: config.aiRateLimit ?? 10,
+    windowMs: config.aiRateWindowMs ?? 60_000,
+  });
+  const telemetry = new InMemoryTelemetry();
 
   return http.createServer(async (req, res) => {
     const requestId = randomUUID();
     const method = req.method || 'GET';
     const url = new URL(req.url || '/', 'http://localhost');
-    const userId = parseUserId(req);
+    let userId = null;
+    const requestStartNs = process.hrtime.bigint();
+
+    res.on('finish', () => {
+      const durationMs = Number(process.hrtime.bigint() - requestStartNs) / 1e6;
+      telemetry.record({ path: url.pathname, status: res.statusCode, durationMs });
+    });
 
     try {
       if (url.pathname === '/health' && method === 'GET') {
         const payload = {
           ok: true,
           service: 'smartcart-backend',
-          modules: ['households', 'lists', 'pricing', 'receipts', 'budget', 'pantry', 'recipes', 'realtime', 'ocr'],
+          modules: ['households', 'lists', 'pricing', 'receipts', 'budget', 'pantry', 'recipes', 'realtime', 'ocr', 'observability'],
         };
         logRequest({ requestId, method, path: url.pathname, userId: null, status: 200 });
         return sendJson(res, 200, payload, requestId);
       }
 
+      if (url.pathname === '/metrics' && method === 'GET') {
+        const payload = telemetry.snapshot({ queueDepth: store.getOcrQueueDepth() });
+        logRequest({ requestId, method, path: url.pathname, userId: null, status: 200 });
+        return sendJson(res, 200, payload, requestId);
+      }
+
+      userId = resolveUserId(req);
       if (!userId) {
         logRequest({ requestId, method, path: url.pathname, userId: null, status: 401, error: 'UNAUTHORIZED' });
         return sendJson(res, 401, { error: 'Missing auth. Use x-user-id or Bearer dev-user:<id>' }, requestId);
+      }
+
+      const globalRate = globalLimiter.take(userId);
+      if (!globalRate.allowed) throw new Error('RATE_LIMIT_GLOBAL');
+
+      if (method === 'POST' && /^\/households\/[^/]+\/recipes\/suggest$/.test(url.pathname)) {
+        const aiRate = aiLimiter.take(userId);
+        if (!aiRate.allowed) throw new Error('RATE_LIMIT_AI');
       }
 
       if (url.pathname === '/households' && method === 'POST') {
@@ -123,6 +144,12 @@ export function createApp() {
         const payload = store.addMember({ actorId: userId, householdId, memberId: body.memberId });
         logRequest({ requestId, method, path: url.pathname, userId, status: 201 });
         return sendJson(res, 201, payload, requestId);
+      }
+
+      if (method === 'GET' && url.pathname === '/security/audit-log') {
+        const payload = store.getSecurityAuditLog({ userId, limit: Number(url.searchParams.get('limit') ?? 100) });
+        logRequest({ requestId, method, path: url.pathname, userId, status: 200 });
+        return sendJson(res, 200, payload, requestId);
       }
 
       if (method === 'GET' && /^\/households\/[^/]+\/items$/.test(url.pathname)) {
@@ -210,7 +237,7 @@ export function createApp() {
         const householdId = url.pathname.split('/')[2];
         const body = await readBody(req);
         assertNonEmptyString(body.objectKey, 'objectKey');
-        const payload = store.enqueueReceiptOcrJob({ userId, householdId, objectKey: body.objectKey });
+        const payload = store.enqueueReceiptOcrJob({ userId, householdId, objectKey: body.objectKey, apiRequestId: requestId });
         logRequest({ requestId, method, path: url.pathname, userId, status: 202 });
         return sendJson(res, 202, payload, requestId);
       }
@@ -242,7 +269,7 @@ export function createApp() {
 
       if (method === 'POST' && /^\/households\/[^/]+\/receipts\/ocr-jobs\/[^/]+\/apply$/.test(url.pathname)) {
         const [, , householdId, , , jobId] = url.pathname.split('/');
-        const payload = store.applyReceiptOcrJobResult({ userId, householdId, jobId });
+        const payload = store.applyReceiptOcrJobResult({ userId, householdId, jobId, applyRequestId: requestId });
         logRequest({ requestId, method, path: url.pathname, userId, status: 200 });
         return sendJson(res, 200, payload, requestId);
       }
@@ -350,8 +377,24 @@ export function createApp() {
     } catch (error) {
       const message = error?.message ?? 'UNKNOWN_ERROR';
       if (message === 'FORBIDDEN_HOUSEHOLD_ACCESS') {
+        store.recordSecurityAudit({ event: 'forbidden_household_access', requestId, userId, path: url.pathname });
         logRequest({ requestId, method, path: url.pathname, userId, status: 403, error: message });
         return sendJson(res, 403, { error: 'Forbidden' }, requestId);
+      }
+      if (message === 'AUTH_INVALID_TOKEN' || message === 'AUTH_EXPIRED_TOKEN') {
+        store.recordSecurityAudit({ event: 'auth_invalid', requestId, userId, path: url.pathname, reason: message });
+        logRequest({ requestId, method, path: url.pathname, userId, status: 401, error: message });
+        return sendJson(res, 401, { error: 'Invalid authentication token' }, requestId);
+      }
+      if (message === 'RATE_LIMIT_GLOBAL') {
+        store.recordSecurityAudit({ event: 'rate_limit_global', requestId, userId, path: url.pathname });
+        logRequest({ requestId, method, path: url.pathname, userId, status: 429, error: message });
+        return sendJson(res, 429, { error: 'Global rate limit exceeded' }, requestId);
+      }
+      if (message === 'RATE_LIMIT_AI') {
+        store.recordSecurityAudit({ event: 'rate_limit_ai', requestId, userId, path: url.pathname });
+        logRequest({ requestId, method, path: url.pathname, userId, status: 429, error: message });
+        return sendJson(res, 429, { error: 'AI endpoint rate limit exceeded' }, requestId);
       }
       if (message === 'ITEM_NOT_FOUND') {
         logRequest({ requestId, method, path: url.pathname, userId, status: 404, error: message });

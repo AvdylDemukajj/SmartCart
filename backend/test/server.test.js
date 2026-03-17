@@ -2,9 +2,10 @@ import http from 'node:http';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createApp } from '../src/server.js';
+import { createTestJwt } from '../src/security.js';
 
-async function withServer(fn) {
-  const server = createApp();
+async function withServer(fn, config) {
+  const server = createApp(config);
   await new Promise((resolve) => server.listen(0, resolve));
   const address = server.address();
   const baseUrl = `http://127.0.0.1:${address.port}`;
@@ -57,6 +58,35 @@ test('supports bearer dev token auth', async () => {
       body: JSON.stringify({ name: 'Auth Household' }),
     });
     assert.equal(res.status, 201);
+  });
+});
+
+test('supports bearer jwt auth with valid signature', async () => {
+  await withServer(async (baseUrl) => {
+    const jwt = createTestJwt({ sub: 'jwt-user' });
+    const res = await fetch(`${baseUrl}/households`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${jwt}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ name: 'JWT Household' }),
+    });
+    assert.equal(res.status, 201);
+  });
+});
+
+test('rejects invalid jwt token', async () => {
+  await withServer(async (baseUrl) => {
+    const res = await fetch(`${baseUrl}/households`, {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer invalid.token.value',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ name: 'Bad JWT Household' }),
+    });
+    assert.equal(res.status, 401);
   });
 });
 
@@ -474,5 +504,156 @@ test('recipe suggest cache + add-to-list expansion works', async () => {
     });
     const cache = await cacheRes.json();
     assert.equal(cache.activeEntries >= 1, true);
+  });
+});
+
+
+
+test('metrics endpoint returns p95 and queue depth snapshot', async () => {
+  await withServer(async (baseUrl) => {
+    await createHousehold(baseUrl, 'ana');
+
+    for (let i = 0; i < 3; i += 1) {
+      const res = await fetch(`${baseUrl}/households`, {
+        headers: { 'x-user-id': 'ana' },
+      });
+      assert.equal(res.status, 200);
+    }
+
+    const metricsRes = await fetch(`${baseUrl}/metrics`);
+    assert.equal(metricsRes.status, 200);
+    const metrics = await metricsRes.json();
+    assert.equal(typeof metrics.p95Ms, 'number');
+    assert.equal(typeof metrics.error5xxRate, 'number');
+    assert.equal(typeof metrics.queueDepth.total, 'number');
+  });
+});
+
+
+test('ocr jobs include trace correlation ids from api to worker to apply', async () => {
+  await withServer(async (baseUrl) => {
+    const household = await createHousehold(baseUrl);
+
+    const jobRes = await fetch(`${baseUrl}/households/${household.id}/receipts/ocr-jobs`, {
+      method: 'POST',
+      headers: { 'x-user-id': 'ana', 'content-type': 'application/json' },
+      body: JSON.stringify({ objectKey: 'receipts/test-correlation.jpg' }),
+    });
+    assert.equal(jobRes.status, 202);
+    const createdJob = await jobRes.json();
+    assert.equal(typeof createdJob.trace.apiRequestId, 'string');
+
+    await new Promise((resolve) => setTimeout(resolve, 60));
+
+    const jobsRes = await fetch(`${baseUrl}/households/${household.id}/receipts/ocr-jobs`, {
+      headers: { 'x-user-id': 'ana' },
+    });
+    const jobs = await jobsRes.json();
+    const done = jobs.find((entry) => entry.jobId === createdJob.jobId);
+    assert.equal(typeof done.trace.workerRunId, 'string');
+
+    const applyRes = await fetch(`${baseUrl}/households/${household.id}/receipts/ocr-jobs/${createdJob.jobId}/apply`, {
+      method: 'POST',
+      headers: { 'x-user-id': 'ana' },
+    });
+    assert.equal(applyRes.status, 200);
+    const applied = await applyRes.json();
+    assert.equal(typeof applied.job.trace.applyRequestId, 'string');
+  });
+});
+
+test('tenant isolation prevents data bleed across multiple household resources', async () => {
+  await withServer(async (baseUrl) => {
+    const anaHousehold = await createHousehold(baseUrl, 'ana');
+    const boraHousehold = await createHousehold(baseUrl, 'bora');
+
+    const addAnaItem = await fetch(`${baseUrl}/households/${anaHousehold.id}/items`, {
+      method: 'POST',
+      headers: { 'x-user-id': 'ana', 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'Qumesht', quantity: 1 }),
+    });
+    assert.equal(addAnaItem.status, 201);
+
+    const boraItemsRead = await fetch(`${baseUrl}/households/${anaHousehold.id}/items`, {
+      headers: { 'x-user-id': 'bora' },
+    });
+    assert.equal(boraItemsRead.status, 403);
+
+    const boraBudgetRead = await fetch(`${baseUrl}/households/${anaHousehold.id}/budget`, {
+      headers: { 'x-user-id': 'bora' },
+    });
+    assert.equal(boraBudgetRead.status, 403);
+
+    const boraPricingRead = await fetch(`${baseUrl}/households/${anaHousehold.id}/pricing/estimate`, {
+      headers: { 'x-user-id': 'bora' },
+    });
+    assert.equal(boraPricingRead.status, 403);
+
+    const anaOwnRead = await fetch(`${baseUrl}/households/${anaHousehold.id}/items`, {
+      headers: { 'x-user-id': 'ana' },
+    });
+    assert.equal(anaOwnRead.status, 200);
+
+    const boraOwnRead = await fetch(`${baseUrl}/households/${boraHousehold.id}/items`, {
+      headers: { 'x-user-id': 'bora' },
+    });
+    assert.equal(boraOwnRead.status, 200);
+    const boraOwnItems = await boraOwnRead.json();
+    assert.equal(boraOwnItems.length, 0);
+  });
+});
+
+test('security audit log captures forbidden access events', async () => {
+  await withServer(async (baseUrl) => {
+    const household = await createHousehold(baseUrl, 'ana');
+    const forbiddenRes = await fetch(`${baseUrl}/households/${household.id}/items`, {
+      headers: { 'x-user-id': 'outsider' },
+    });
+    assert.equal(forbiddenRes.status, 403);
+
+    const auditRes = await fetch(`${baseUrl}/security/audit-log?limit=10`, {
+      headers: { 'x-user-id': 'ana' },
+    });
+    assert.equal(auditRes.status, 200);
+    const logs = await auditRes.json();
+    assert.equal(logs.some((entry) => entry.event === 'forbidden_household_access'), true);
+  });
+});
+
+test('global and ai rate limits return 429 when exceeded', async () => {
+  await withServer(async (baseUrl) => {
+    const household = await createHousehold(baseUrl, 'ana');
+    const aiHousehold = await createHousehold(baseUrl, 'bora');
+
+    for (let i = 0; i < 19; i += 1) {
+      const okRes = await fetch(`${baseUrl}/households`, {
+        method: 'GET',
+        headers: { 'x-user-id': 'ana' },
+      });
+      assert.equal(okRes.status, 200);
+    }
+
+    const blockedGlobal = await fetch(`${baseUrl}/households`, {
+      method: 'GET',
+      headers: { 'x-user-id': 'ana' },
+    });
+    assert.equal(blockedGlobal.status, 429);
+
+    const firstAi = await fetch(`${baseUrl}/households/${aiHousehold.id}/recipes/suggest`, {
+      method: 'POST',
+      headers: { 'x-user-id': 'bora' },
+    });
+    assert.equal(firstAi.status, 200);
+
+    const aiRes = await fetch(`${baseUrl}/households/${aiHousehold.id}/recipes/suggest`, {
+      method: 'POST',
+      headers: { 'x-user-id': 'bora' },
+    });
+    assert.equal(aiRes.status, 429);
+  }, {
+    globalRateLimit: 20,
+    globalRateWindowMs: 60_000,
+    aiRateLimit: 1,
+    aiRateWindowMs: 60_000,
   });
 });

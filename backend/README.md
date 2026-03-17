@@ -20,6 +20,12 @@ Backend API për SmartCart AI me module MVP + foundations për features e PRD-s�
 - Optimistic concurrency bazike në list items (`version`)
 - Drizzle schema + migration scaffold (Phase 6 foundation)
 - Repository pattern fillestar (pricing repository i ndarë)
+- JWT auth verification (HS256) me secret rotation (`AUTH_JWT_SECRETS`)
+- Global + AI endpoint rate limiting (fixed-window)
+- Security audit log endpoint (`/security/audit-log`)
+- RLS migration policies për tabelat tenant-bound
+- Observability metrics endpoint (`/metrics`) me p95/error-rate/queue-depth
+- OCR trace correlation fields (`apiRequestId`, `workerRunId`, `applyRequestId`)
 
 ## E rëndësishme: GitHub import status
 U provua importimi i kodit nga `https://github.com/burakorkmez/grocify-expo`, por qasja e rrjetit dështoi me `CONNECT tunnel failed, response 403` në këtë mjedis ekzekutimi.
@@ -45,13 +51,17 @@ npm test
 Aktualisht mbështetet:
 - `x-user-id: <id>`
 - `Authorization: Bearer dev-user:<id>` (dev mode)
+- `Authorization: Bearer <jwt>` (HS256; `sub` claim)
 
-Në fazën tjetër ky zëvendësohet me Clerk JWT + RLS enforcement në Postgres.
+Secrets për JWT verification/rotation:
+- `AUTH_JWT_SECRET` ose `AUTH_JWT_SECRETS=oldSecret,newSecret`
 
 ## API Endpoints
 
 ### System
 - `GET /health`
+- `GET /metrics`
+- `GET /security/audit-log`
 
 ### Households
 - `POST /households`
@@ -101,3 +111,19 @@ Skema SQL në `db/schema.sql` është baza për migrim në Postgres + Drizzle + 
 - Drizzle schema: `db/drizzle/schema.ts`
 - SQL migration scaffold: `db/migrations/0001_initial.sql`
 - Repository abstraction (current): `src/repositories/price-repository.js`
+
+See also: `../docs/security/secrets-management-policy.md`.
+
+Ops docs:
+- `../docs/ops/alerting-rules.md`
+- `../docs/ops/incident-runbook.md`
+
+
+Additional docs:
+- `../docs/frontend-backend-endpoint-map.md`
+- `../docs/release/staging-smoke-tests.md`
+- `../docs/release/production-readiness-checklist.md`
+
+Load test starters:
+- `load/k6-smoke.js`
+- `load/artillery-smoke.yml`

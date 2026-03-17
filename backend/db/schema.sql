@@ -89,7 +89,5 @@ create table if not exists flyer_offers (
   valid_to date
 );
 
--- RLS sketch:
--- alter table households enable row level security;
--- create policy households_isolation on households
--- using (id in (select household_id from household_members where user_id = current_setting('app.user_id')));
+-- RLS is enforced in migration 0002_rls_and_security.sql.
+-- App code should set `set local app.user_id = '<authenticated-user-id>'` per request.

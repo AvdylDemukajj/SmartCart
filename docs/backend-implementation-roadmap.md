@@ -5,8 +5,8 @@ Ky roadmap e ndan backend-in në hapa të menaxhueshëm që të ndërtohet gradu
 ## Phase 0 — Import & Baseline
 - [x] Krijo bazën e backend-it në këtë repository.
 - [ ] Importo kodin nga `grocify-expo` në këtë repo si referencë frontend/shared contracts.
-- [ ] Mappo endpoint-et backend me flow-et e frontend-it nga repo referencë.
-- [ ] Shto CI bazike për lint/test.
+- [x] Mappo endpoint-et backend me flow-et e frontend-it nga repo referencë (draft map në `docs/frontend-backend-endpoint-map.md`).
+- [x] Shto CI bazike për lint/test.
 
 ## Phase 1 — Core Platform Foundations
 - [x] Health endpoint.
@@ -50,28 +50,28 @@ Ky roadmap e ndan backend-in në hapa të menaxhueshëm që të ndërtohet gradu
 - [x] SQL draft schema fillestare.
 - [x] Drizzle schema + migrations.
 - [~] Repository pattern (store -> db service) (në progres: pricing repository abstraction).
-- [ ] Enable RLS në tabelat tenant-bound.
-- [ ] Integration tests për tenant data bleed prevention.
+- [x] Enable RLS në tabelat tenant-bound.
+- [x] Integration tests për tenant data bleed prevention.
 
 ## Phase 7 — Security Hardening
-- [ ] JWT validation/rotation.
-- [ ] Rate limits globale dhe për endpoint AI.
-- [ ] Input schema validation të plotë (zod/class-validator).
-- [ ] Abuse detection + audit log.
-- [ ] Secrets management policy.
+- [x] JWT validation/rotation.
+- [x] Rate limits globale dhe për endpoint AI.
+- [~] Input schema validation të plotë (zod/class-validator) (në progres: hardening me helper checks + stricter auth parsing).
+- [x] Abuse detection + audit log.
+- [x] Secrets management policy.
 
 ## Phase 8 — Observability & Ops
-- [ ] Metrics (p95 latency, queue depth, error rate).
-- [ ] Trace correlation API -> workers -> DB.
-- [ ] Alerting rules.
-- [ ] Runbooks për incidents.
+- [x] Metrics (p95 latency, queue depth, error rate).
+- [~] Trace correlation API -> workers -> DB (në progres: API request-id -> OCR worker trace IDs).
+- [x] Alerting rules.
+- [x] Runbooks për incidents.
 
 ## Phase 9 — QA & Release
 - [x] Integration tests bazike për flows kryesore.
-- [ ] Contract tests me frontend clients.
-- [ ] Load tests (k6/artillery).
-- [ ] Staging deployment + smoke tests.
-- [ ] Production readiness checklist.
+- [x] Contract tests me frontend clients.
+- [~] Load tests (k6/artillery) (në progres: smoke scripts `backend/load/*`).
+- [~] Staging deployment + smoke tests (në progres: `scripts/smoke-staging.sh` + playbook).
+- [x] Production readiness checklist.
 
 ## Current sprint (implemented now)
 - [x] Real-time SSE stream endpoint për household activity.
@@ -89,3 +89,4 @@ Ky roadmap e ndan backend-in në hapa të menaxhueshëm që të ndërtohet gradu
 - [x] Recipe cache + recipe-to-list expansion API.
 - [x] Phase 6 scaffold: Drizzle schema + initial migration + pricing repository split.
 
+50
