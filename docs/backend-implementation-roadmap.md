@@ -36,20 +36,20 @@ Ky roadmap e ndan backend-in në hapa të menaxhueshëm që të ndërtohet gradu
 - [x] Auto-mark list items from receipts.
 - [~] Presigned upload endpoint (S3/R2) (në progres: simulated upload URL endpoint).
 - [~] OCR queue me BullMQ (në progres: in-memory OCR job queue + states).
-- [ ] Manual correction flow për OCR failures.
+- [x] Manual correction flow për OCR failures.
 
 ## Phase 5 — Pantry & AI Recipes
 - [x] Pantry endpoints bazike.
 - [x] Recipe suggestions endpoint (stub logic).
 - [x] Free-tier rate limiting (3/day).
 - [ ] Lidhje me model AI real.
-- [ ] Prompt templates + response cache.
-- [ ] Recipe -> shopping list ingredient expansion.
+- [x] Prompt templates + response cache.
+- [x] Recipe -> shopping list ingredient expansion.
 
 ## Phase 6 — Data Layer Migration (Postgres + Drizzle + RLS)
 - [x] SQL draft schema fillestare.
-- [ ] Drizzle schema + migrations.
-- [ ] Repository pattern (store -> db service).
+- [x] Drizzle schema + migrations.
+- [~] Repository pattern (store -> db service) (në progres: pricing repository abstraction).
 - [ ] Enable RLS në tabelat tenant-bound.
 - [ ] Integration tests për tenant data bleed prevention.
 
@@ -85,4 +85,7 @@ Ky roadmap e ndan backend-in në hapa të menaxhueshëm që të ndërtohet gradu
 - [x] Pricing canonical matching + confidence scores.
 - [x] In-memory TTL cache për pricing estimate.
 - [x] Simulated presigned upload + OCR jobs endpoints.
+- [x] OCR retry/dead-letter + manual correction flow.
+- [x] Recipe cache + recipe-to-list expansion API.
+- [x] Phase 6 scaffold: Drizzle schema + initial migration + pricing repository split.
 

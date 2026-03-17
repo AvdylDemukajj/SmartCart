@@ -222,6 +222,24 @@ export function createApp() {
         return sendJson(res, 200, payload, requestId);
       }
 
+
+      if (method === 'POST' && /^\/households\/[^/]+\/receipts\/ocr-jobs\/[^/]+\/retry$/.test(url.pathname)) {
+        const [, , householdId, , , jobId] = url.pathname.split('/');
+        const payload = store.retryReceiptOcrJob({ userId, householdId, jobId });
+        logRequest({ requestId, method, path: url.pathname, userId, status: 202 });
+        return sendJson(res, 202, payload, requestId);
+      }
+
+      if (method === 'PATCH' && /^\/households\/[^/]+\/receipts\/ocr-jobs\/[^/]+\/correct$/.test(url.pathname)) {
+        const [, , householdId, , , jobId] = url.pathname.split('/');
+        const body = await readBody(req);
+        assertNonEmptyString(body.store, 'store');
+        if (!Array.isArray(body.items) || body.items.length === 0) throw new Error('VALIDATION_ITEMS');
+        const payload = store.correctReceiptOcrJob({ userId, householdId, jobId, store: body.store, items: body.items });
+        logRequest({ requestId, method, path: url.pathname, userId, status: 200 });
+        return sendJson(res, 200, payload, requestId);
+      }
+
       if (method === 'POST' && /^\/households\/[^/]+\/receipts\/ocr-jobs\/[^/]+\/apply$/.test(url.pathname)) {
         const [, , householdId, , , jobId] = url.pathname.split('/');
         const payload = store.applyReceiptOcrJobResult({ userId, householdId, jobId });
@@ -277,9 +295,24 @@ export function createApp() {
         return sendJson(res, 200, payload, requestId);
       }
 
+
+      if (method === 'POST' && /^\/households\/[^/]+\/recipes\/[^/]+\/add-to-list$/.test(url.pathname)) {
+        const [, , householdId, , recipeKey] = url.pathname.split('/');
+        const payload = store.addRecipeIngredientsToList({ userId, householdId, recipeKey });
+        logRequest({ requestId, method, path: url.pathname, userId, status: 200 });
+        return sendJson(res, 200, payload, requestId);
+      }
+
+      if (method === 'GET' && url.pathname === '/recipes/cache') {
+        const payload = store.getRecipeCacheStatus();
+        logRequest({ requestId, method, path: url.pathname, userId, status: 200 });
+        return sendJson(res, 200, payload, requestId);
+      }
+
       if (method === 'POST' && /^\/households\/[^/]+\/recipes\/suggest$/.test(url.pathname)) {
         const householdId = url.pathname.split('/')[2];
-        const payload = store.suggestRecipes({ userId, householdId });
+        const refresh = url.searchParams.get('refresh') === '1';
+        const payload = store.suggestRecipes({ userId, householdId, refresh });
         logRequest({ requestId, method, path: url.pathname, userId, status: 200 });
         return sendJson(res, 200, payload, requestId);
       }
@@ -339,6 +372,18 @@ export function createApp() {
       if (message === 'OCR_JOB_NOT_READY') {
         logRequest({ requestId, method, path: url.pathname, userId, status: 409, error: message });
         return sendJson(res, 409, { error: 'OCR job not ready' }, requestId);
+      }
+      if (message === 'OCR_JOB_RETRY_NOT_ALLOWED') {
+        logRequest({ requestId, method, path: url.pathname, userId, status: 409, error: message });
+        return sendJson(res, 409, { error: 'OCR job retry not allowed for current state' }, requestId);
+      }
+      if (message === 'OCR_JOB_CORRECTION_NOT_ALLOWED') {
+        logRequest({ requestId, method, path: url.pathname, userId, status: 409, error: message });
+        return sendJson(res, 409, { error: 'OCR job correction not allowed for current state' }, requestId);
+      }
+      if (message === 'RECIPE_NOT_FOUND') {
+        logRequest({ requestId, method, path: url.pathname, userId, status: 404, error: message });
+        return sendJson(res, 404, { error: 'Recipe not found' }, requestId);
       }
       if (message.startsWith('VALIDATION_')) {
         logRequest({ requestId, method, path: url.pathname, userId, status: 400, error: message });

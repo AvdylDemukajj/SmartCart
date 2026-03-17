@@ -11,10 +11,15 @@ Backend API për SmartCart AI me module MVP + foundations për features e PRD-s�
 - Pricing estimate cache me TTL 6 orë
 - Receipts ingestion (manual payload) + budget updates
 - Presigned upload URL (simuluar) + OCR jobs workflow
+- OCR retry + dead-letter + manual correction flow
 - Pantry tracking
 - Recipe suggestions (AI-like stub) + rate limiting (3/ditë për user)
+- Recipe prompt templates + response cache (TTL)
+- Recipe -> shopping list ingredient expansion endpoint
 - Request-id dhe structured logs bazike
 - Optimistic concurrency bazike në list items (`version`)
+- Drizzle schema + migration scaffold (Phase 6 foundation)
+- Repository pattern fillestar (pricing repository i ndarë)
 
 ## E rëndësishme: GitHub import status
 U provua importimi i kodit nga `https://github.com/burakorkmez/grocify-expo`, por qasja e rrjetit dështoi me `CONNECT tunnel failed, response 403` në këtë mjedis ekzekutimi.
@@ -68,6 +73,8 @@ Në fazën tjetër ky zëvendësohet me Clerk JWT + RLS enforcement në Postgres
 - `POST /households/:householdId/receipts/upload-url`
 - `POST /households/:householdId/receipts/ocr-jobs`
 - `GET /households/:householdId/receipts/ocr-jobs`
+- `POST /households/:householdId/receipts/ocr-jobs/:jobId/retry`
+- `PATCH /households/:householdId/receipts/ocr-jobs/:jobId/correct`
 - `POST /households/:householdId/receipts/ocr-jobs/:jobId/apply`
 
 ### Pricing & Flyers
@@ -82,7 +89,15 @@ Në fazën tjetër ky zëvendësohet me Clerk JWT + RLS enforcement në Postgres
 - `GET /households/:householdId/pantry`
 - `POST /households/:householdId/pantry`
 - `POST /households/:householdId/recipes/suggest`
+- `POST /households/:householdId/recipes/:recipeKey/add-to-list`
+- `GET /recipes/cache`
 
 ## Persistence
 Implementimi aktual përdor in-memory store për zhvillim të shpejtë.
 Skema SQL në `db/schema.sql` është baza për migrim në Postgres + Drizzle + RLS.
+
+
+## Data Layer Scaffold
+- Drizzle schema: `db/drizzle/schema.ts`
+- SQL migration scaffold: `db/migrations/0001_initial.sql`
+- Repository abstraction (current): `src/repositories/price-repository.js`

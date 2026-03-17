@@ -187,16 +187,18 @@ test('recipes endpoint enforces daily free-tier limit', async () => {
     const household = await createHousehold(baseUrl);
     const headers = { 'x-user-id': 'ana', 'content-type': 'application/json' };
 
-    await fetch(`${baseUrl}/households/${household.id}/pantry`, {
+    const pantry1 = await fetch(`${baseUrl}/households/${household.id}/pantry`, {
       method: 'POST',
       headers,
       body: JSON.stringify({ name: 'Domate', quantity: 2 }),
     });
-    await fetch(`${baseUrl}/households/${household.id}/pantry`, {
+    assert.equal(pantry1.status, 201);
+    const pantry2 = await fetch(`${baseUrl}/households/${household.id}/pantry`, {
       method: 'POST',
       headers,
       body: JSON.stringify({ name: 'Veze', quantity: 6 }),
     });
+    assert.equal(pantry2.status, 201);
 
     for (let i = 0; i < 3; i += 1) {
       const okRes = await fetch(`${baseUrl}/households/${household.id}/recipes/suggest`, {
@@ -359,5 +361,118 @@ test('receipt OCR flow: upload url -> job -> apply result', async () => {
     const applied = await applyRes.json();
     assert.equal(typeof applied.appliedReceipt.id, 'string');
     assert.equal(applied.budget.spent > 0, true);
+  });
+});
+
+
+test('OCR manual correction flow works for failed/dead-letter jobs', async () => {
+  await withServer(async (baseUrl) => {
+    const household = await createHousehold(baseUrl);
+
+    const uploadRes = await fetch(`${baseUrl}/households/${household.id}/receipts/upload-url`, {
+      method: 'POST',
+      headers: { 'x-user-id': 'ana', 'content-type': 'application/json' },
+      body: JSON.stringify({ fileName: 'receipt-fail.jpg' }),
+    });
+    const upload = await uploadRes.json();
+
+    const jobRes = await fetch(`${baseUrl}/households/${household.id}/receipts/ocr-jobs`, {
+      method: 'POST',
+      headers: { 'x-user-id': 'ana', 'content-type': 'application/json' },
+      body: JSON.stringify({ objectKey: `${upload.objectKey}-fail` }),
+    });
+    const job = await jobRes.json();
+
+    await new Promise((resolve) => setTimeout(resolve, 60));
+
+    for (let i = 0; i < 2; i += 1) {
+      const retryRes = await fetch(`${baseUrl}/households/${household.id}/receipts/ocr-jobs/${job.jobId}/retry`, {
+        method: 'POST',
+        headers: { 'x-user-id': 'ana' },
+      });
+      assert.equal(retryRes.status, 202);
+      await new Promise((resolve) => setTimeout(resolve, 60));
+    }
+
+    const jobsRes = await fetch(`${baseUrl}/households/${household.id}/receipts/ocr-jobs`, {
+      headers: { 'x-user-id': 'ana' },
+    });
+    const jobs = await jobsRes.json();
+    const target = jobs.find((entry) => entry.jobId === job.jobId);
+    assert.equal(target.status, 'dead_letter');
+
+    const correctRes = await fetch(`${baseUrl}/households/${household.id}/receipts/ocr-jobs/${job.jobId}/correct`, {
+      method: 'PATCH',
+      headers: { 'x-user-id': 'ana', 'content-type': 'application/json' },
+      body: JSON.stringify({
+        store: 'manual-fix-store',
+        items: [{ name: 'Domate', quantity: 2, unitPrice: 1.5 }],
+      }),
+    });
+    assert.equal(correctRes.status, 200);
+
+    const applyRes = await fetch(`${baseUrl}/households/${household.id}/receipts/ocr-jobs/${job.jobId}/apply`, {
+      method: 'POST',
+      headers: { 'x-user-id': 'ana' },
+    });
+    assert.equal(applyRes.status, 200);
+    const applied = await applyRes.json();
+    assert.equal(applied.job.status, 'succeeded_corrected');
+    assert.equal(applied.appliedReceipt.store, 'manual-fix-store');
+  });
+});
+
+
+test('recipe suggest cache + add-to-list expansion works', async () => {
+  await withServer(async (baseUrl) => {
+    const household = await createHousehold(baseUrl);
+
+    const pantryA = await fetch(`${baseUrl}/households/${household.id}/pantry`, {
+      method: 'POST',
+      headers: { 'x-user-id': 'ana', 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'Domate', quantity: 2 }),
+    });
+    assert.equal(pantryA.status, 201);
+    const pantryB = await fetch(`${baseUrl}/households/${household.id}/pantry`, {
+      method: 'POST',
+      headers: { 'x-user-id': 'ana', 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'Veze', quantity: 6 }),
+    });
+    assert.equal(pantryB.status, 201);
+
+    const firstRes = await fetch(`${baseUrl}/households/${household.id}/recipes/suggest`, {
+      method: 'POST',
+      headers: { 'x-user-id': 'ana' },
+    });
+    const first = await firstRes.json();
+    assert.equal(first.cached, false);
+    assert.equal(first.suggestions.length >= 1, true);
+
+    const secondRes = await fetch(`${baseUrl}/households/${household.id}/recipes/suggest`, {
+      method: 'POST',
+      headers: { 'x-user-id': 'ana' },
+    });
+    const second = await secondRes.json();
+    assert.equal(second.cached, true);
+
+    const addRes = await fetch(`${baseUrl}/households/${household.id}/recipes/shakshuka/add-to-list`, {
+      method: 'POST',
+      headers: { 'x-user-id': 'ana' },
+    });
+    assert.equal(addRes.status, 200);
+    const addPayload = await addRes.json();
+    assert.equal(Array.isArray(addPayload.addedItems), true);
+
+    const listRes = await fetch(`${baseUrl}/households/${household.id}/items`, {
+      headers: { 'x-user-id': 'ana' },
+    });
+    const items = await listRes.json();
+    assert.equal(items.some((entry) => entry.name.toLowerCase().includes('buke')), true);
+
+    const cacheRes = await fetch(`${baseUrl}/recipes/cache`, {
+      headers: { 'x-user-id': 'ana' },
+    });
+    const cache = await cacheRes.json();
+    assert.equal(cache.activeEntries >= 1, true);
   });
 });
