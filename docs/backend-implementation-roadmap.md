@@ -20,7 +20,7 @@ Ky roadmap e ndan backend-in në hapa të menaxhueshëm që të ndërtohet gradu
 - [x] Auto-categorization për item names.
 - [x] Real-time stream endpoint (SSE) për household events.
 - [x] Optimistic concurrency me `version` në list items.
-- [ ] WebSocket gateway (opsionale) krahas SSE.
+- [x] WebSocket gateway (opsionale) krahas SSE.
 
 ## Phase 3 — Pricing & Flyers Engine
 - [x] Endpoint për pricing estimate sipas store.
@@ -28,7 +28,7 @@ Ky roadmap e ndan backend-in në hapa të menaxhueshëm që të ndërtohet gradu
 - [x] `prices_staging` ingestion API.
 - [x] Validation pipeline staging -> live.
 - [x] Canonical product matching + confidence scores.
-- [~] Cache layer (Redis) për totals me TTL (në progres: in-memory TTL cache aktive).
+- [x] Cache layer (Redis) për totals me TTL (fallback: in-memory cache).
 
 ## Phase 4 — Receipts & Budget
 - [x] Manual receipt ingestion endpoint.
@@ -42,27 +42,27 @@ Ky roadmap e ndan backend-in në hapa të menaxhueshëm që të ndërtohet gradu
 - [x] Pantry endpoints bazike.
 - [x] Recipe suggestions endpoint (stub logic).
 - [x] Free-tier rate limiting (3/day).
-- [ ] Lidhje me model AI real.
+- [~] Lidhje me model AI real (OpenAI provider optional + stub fallback).
 - [x] Prompt templates + response cache.
 - [x] Recipe -> shopping list ingredient expansion.
 
 ## Phase 6 — Data Layer Migration (Postgres + Drizzle + RLS)
 - [x] SQL draft schema fillestare.
 - [x] Drizzle schema + migrations.
-- [~] Repository pattern (store -> db service) (në progres: pricing repository abstraction).
+- [x] Repository pattern (store -> db service) (app repository abstraction + pricing repository).
 - [x] Enable RLS në tabelat tenant-bound.
 - [x] Integration tests për tenant data bleed prevention.
 
 ## Phase 7 — Security Hardening
 - [x] JWT validation/rotation.
 - [x] Rate limits globale dhe për endpoint AI.
-- [~] Input schema validation të plotë (zod/class-validator) (në progres: hardening me helper checks + stricter auth parsing).
+- [x] Input schema validation të plotë (framework applied across endpoints).
 - [x] Abuse detection + audit log.
 - [x] Secrets management policy.
 
 ## Phase 8 — Observability & Ops
 - [x] Metrics (p95 latency, queue depth, error rate).
-- [~] Trace correlation API -> workers -> DB (në progres: API request-id -> OCR worker trace IDs).
+- [x] Trace correlation API -> workers -> DB (request-id -> repository db trace + OCR worker trace).
 - [x] Alerting rules.
 - [x] Runbooks për incidents.
 
@@ -88,5 +88,3 @@ Ky roadmap e ndan backend-in në hapa të menaxhueshëm që të ndërtohet gradu
 - [x] OCR retry/dead-letter + manual correction flow.
 - [x] Recipe cache + recipe-to-list expansion API.
 - [x] Phase 6 scaffold: Drizzle schema + initial migration + pricing repository split.
-
-50

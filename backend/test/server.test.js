@@ -246,6 +246,8 @@ test('recipes endpoint enforces daily free-tier limit', async () => {
   });
 });
 
+
+
 test('real-time stream emits activity events', async () => {
   await withServer(async (baseUrl) => {
     const household = await createHousehold(baseUrl, 'ana');
@@ -612,11 +614,110 @@ test('security audit log captures forbidden access events', async () => {
     assert.equal(forbiddenRes.status, 403);
 
     const auditRes = await fetch(`${baseUrl}/security/audit-log?limit=10`, {
-      headers: { 'x-user-id': 'ana' },
+      headers: { 'x-user-id': 'admin' },
     });
     assert.equal(auditRes.status, 200);
     const logs = await auditRes.json();
     assert.equal(logs.some((entry) => entry.event === 'forbidden_household_access'), true);
+  });
+});
+
+
+
+test('non-admin cannot access security audit log', async () => {
+  await withServer(async (baseUrl) => {
+    const household = await createHousehold(baseUrl, 'ana');
+    const forbiddenRes = await fetch(`${baseUrl}/households/${household.id}/items`, {
+      headers: { 'x-user-id': 'outsider' },
+    });
+    assert.equal(forbiddenRes.status, 403);
+
+    const auditRes = await fetch(`${baseUrl}/security/audit-log?limit=10`, {
+      headers: { 'x-user-id': 'ana' },
+    });
+    assert.equal(auditRes.status, 403);
+  });
+});
+
+
+test('invalid receipt item payload returns 400', async () => {
+  await withServer(async (baseUrl) => {
+    const household = await createHousehold(baseUrl, 'ana');
+
+    const receiptRes = await fetch(`${baseUrl}/households/${household.id}/receipts`, {
+      method: 'POST',
+      headers: { 'x-user-id': 'ana', 'content-type': 'application/json' },
+      body: JSON.stringify({
+        store: 'viva',
+        items: [{ name: '', quantity: -1, unitPrice: -2 }],
+      }),
+    });
+
+    assert.equal(receiptRes.status, 400);
+    const body = await receiptRes.json();
+    assert.equal(typeof body.error, 'string');
+    assert.equal(body.error.startsWith('VALIDATION_'), true);
+  });
+});
+
+
+
+test('trace endpoint returns db correlation entries for request id', async () => {
+  await withServer(async (baseUrl) => {
+    const createRes = await fetch(`${baseUrl}/households`, {
+      method: 'POST',
+      headers: { 'x-user-id': 'ana', 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'Trace Home' }),
+    });
+    assert.equal(createRes.status, 201);
+    const requestId = createRes.headers.get('x-request-id');
+    assert.equal(typeof requestId, 'string');
+
+    const traceRes = await fetch(`${baseUrl}/trace/${requestId}`, {
+      headers: { 'x-user-id': 'admin' },
+    });
+    assert.equal(traceRes.status, 200);
+    const trace = await traceRes.json();
+    assert.equal(Array.isArray(trace), true);
+    assert.equal(trace.some((entry) => entry.entity === 'households'), true);
+  });
+});
+
+
+test('query validation rejects invalid refresh and limit values', async () => {
+  await withServer(async (baseUrl) => {
+    const household = await createHousehold(baseUrl, 'ana');
+
+    const refreshRes = await fetch(`${baseUrl}/households/${household.id}/pricing/estimate?refresh=abc`, {
+      headers: { 'x-user-id': 'ana' },
+    });
+    assert.equal(refreshRes.status, 400);
+
+    const limitRes = await fetch(`${baseUrl}/security/audit-log?limit=abc`, {
+      headers: { 'x-user-id': 'admin' },
+    });
+    assert.equal(limitRes.status, 400);
+  });
+});
+
+
+test('toggle payload validation rejects invalid expectedVersion', async () => {
+  await withServer(async (baseUrl) => {
+    const household = await createHousehold(baseUrl, 'ana');
+
+    const addItem = await fetch(`${baseUrl}/households/${household.id}/items`, {
+      method: 'POST',
+      headers: { 'x-user-id': 'ana', 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'Buke', quantity: 1 }),
+    });
+    const item = await addItem.json();
+
+    const toggleRes = await fetch(`${baseUrl}/households/${household.id}/items/${item.id}`, {
+      method: 'PATCH',
+      headers: { 'x-user-id': 'ana', 'content-type': 'application/json' },
+      body: JSON.stringify({ expectedVersion: -1 }),
+    });
+    assert.equal(toggleRes.status, 400);
   });
 });
 

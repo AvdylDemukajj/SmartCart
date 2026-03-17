@@ -5,6 +5,7 @@ Backend API për SmartCart AI me module MVP + foundations për features e PRD-s�
 - Households & members
 - Shopping list + categorization + activity log
 - Real-time stream (SSE) për activity events
+- WebSocket household sync endpoint (`/ws/households/:householdId`)
 - Pricing estimate + flyers hints
 - Pricing staging -> promotion workflow me validim bazik
 - Canonical product matching + confidence scores (pricing pipeline)
@@ -13,19 +14,22 @@ Backend API për SmartCart AI me module MVP + foundations për features e PRD-s�
 - Presigned upload URL (simuluar) + OCR jobs workflow
 - OCR retry + dead-letter + manual correction flow
 - Pantry tracking
-- Recipe suggestions (AI-like stub) + rate limiting (3/ditë për user)
+- Recipe suggestions (AI provider-ready: OpenAI fallback to stub) + rate limiting (3/ditë për user)
 - Recipe prompt templates + response cache (TTL)
 - Recipe -> shopping list ingredient expansion endpoint
 - Request-id dhe structured logs bazike
 - Optimistic concurrency bazike në list items (`version`)
 - Drizzle schema + migration scaffold (Phase 6 foundation)
+- Full app repository abstraction (households/lists/budget/receipts/pantry/ocr)
 - Repository pattern fillestar (pricing repository i ndarë)
 - JWT auth verification (HS256) me secret rotation (`AUTH_JWT_SECRETS`)
 - Global + AI endpoint rate limiting (fixed-window)
 - Security audit log endpoint (`/security/audit-log`)
 - RLS migration policies për tabelat tenant-bound
 - Observability metrics endpoint (`/metrics`) me p95/error-rate/queue-depth
+- Redis-backed cache (when `REDIS_URL` is configured)
 - OCR trace correlation fields (`apiRequestId`, `workerRunId`, `applyRequestId`)
+- End-to-end trace endpoint (`/trace/:requestId`) for DB/worker correlation
 
 ## E rëndësishme: GitHub import status
 U provua importimi i kodit nga `https://github.com/burakorkmez/grocify-expo`, por qasja e rrjetit dështoi me `CONNECT tunnel failed, response 403` në këtë mjedis ekzekutimi.
@@ -55,13 +59,18 @@ Aktualisht mbështetet:
 
 Secrets për JWT verification/rotation:
 - `AUTH_JWT_SECRET` ose `AUTH_JWT_SECRETS=oldSecret,newSecret`
+- `SECURITY_AUDIT_ADMIN_USER_ID` (default `admin`)
+- `SECURITY_AUDIT_ADMIN_KEY` (opsionale për akses me `x-admin-key`)
+- `REDIS_URL` (opsionale për real cache backend)
+- `AI_PROVIDER=openai`, `OPENAI_API_KEY`, `OPENAI_MODEL` (opsionale për AI provider real)
 
 ## API Endpoints
 
 ### System
 - `GET /health`
 - `GET /metrics`
-- `GET /security/audit-log`
+- `GET /security/audit-log` (admin only)
+- `GET /trace/:requestId` (admin only)
 
 ### Households
 - `POST /households`
@@ -74,6 +83,7 @@ Secrets për JWT verification/rotation:
 - `PATCH /households/:householdId/items/:itemId` (opsionale: `expectedVersion` në body)
 - `GET /households/:householdId/activity`
 - `GET /households/:householdId/stream` (SSE real-time events)
+- `GET /ws/households/:householdId` (WebSocket upgrade endpoint)
 
 ### Budget & Receipts
 - `GET /households/:householdId/budget`

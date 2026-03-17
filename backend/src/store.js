@@ -1,6 +1,8 @@
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { InMemoryPriceRepository } from './repositories/price-repository.js';
+import { InMemoryAppRepository } from './repositories/app-repository.js';
+import { generateRecipeSuggestions } from './ai-provider.js';
 
 const DEFAULT_CATEGORY_MAP = [
   { keywords: ['qumesht', 'djath', 'kos'], category: 'Bulmet' },
@@ -59,79 +61,72 @@ const RECIPE_TEMPLATES = {
 };
 
 export class SmartCartStore {
-  constructor() {
+  constructor({ cache = null } = {}) {
     this.events = new EventEmitter();
-    this.households = new Map();
-    this.memberships = new Map();
-    this.listItems = new Map();
-    this.activity = new Map();
-    this.budgets = new Map();
-    this.receipts = new Map();
-    this.pantry = new Map();
-    this.recipeUsage = new Map();
+    this.repo = new InMemoryAppRepository();
     this.recipeSuggestionCache = new Map();
     this.flyers = STARTER_FLYERS;
     this.pricingEstimateCache = new Map();
     this.priceRepository = new InMemoryPriceRepository(STARTER_PRICE_BOOK);
-    this.receiptUploads = new Map();
-    this.receiptOcrJobs = new Map();
-    this.securityAuditLog = [];
+    this.cache = cache;
   }
 
   recordSecurityAudit(event) {
-    this.securityAuditLog.push({
+    this.repo.securityAuditLog.push({
       id: randomUUID(),
       ...event,
       createdAt: new Date().toISOString(),
     });
-    if (this.securityAuditLog.length > 500) this.securityAuditLog.shift();
+    if (this.repo.securityAuditLog.length > 500) this.repo.securityAuditLog.shift();
   }
 
   getSecurityAuditLog({ userId, limit = 100 }) {
     if (!userId) throw new Error('FORBIDDEN_HOUSEHOLD_ACCESS');
-    return this.securityAuditLog.slice(-Math.max(1, Math.min(500, limit)));
+    return this.repo.securityAuditLog.slice(-Math.max(1, Math.min(500, limit)));
   }
 
   ensureUser(userId) {
-    if (!this.memberships.has(userId)) this.memberships.set(userId, new Set());
+    if (!this.repo.memberships.has(userId)) this.repo.memberships.set(userId, new Set());
   }
 
-  createHousehold({ ownerId, name }) {
+  createHousehold({ ownerId, name, traceContext = null }) {
     const id = randomUUID();
     const household = { id, name, ownerId, createdAt: new Date().toISOString() };
-    this.households.set(id, household);
+    this.repo.households.set(id, household);
     this.ensureUser(ownerId);
-    this.memberships.get(ownerId).add(id);
-    this.listItems.set(id, []);
-    this.activity.set(id, []);
-    this.budgets.set(id, { householdId: id, month: this.currentMonth(), limit: 300, spent: 0, updatedAt: new Date().toISOString() });
-    this.receipts.set(id, []);
-    this.pantry.set(id, []);
-    this.receiptUploads.set(id, []);
-    this.receiptOcrJobs.set(id, []);
+    this.repo.memberships.get(ownerId).add(id);
+    this.repo.listItems.set(id, []);
+    this.repo.activity.set(id, []);
+    this.repo.budgets.set(id, { householdId: id, month: this.currentMonth(), limit: 300, spent: 0, updatedAt: new Date().toISOString() });
+    this.repo.receipts.set(id, []);
+    this.repo.pantry.set(id, []);
+    this.repo.receiptUploads.set(id, []);
+    this.repo.receiptOcrJobs.set(id, []);
     this.pushActivity(id, ownerId, 'household.created', `${ownerId} krijoi household-in`);
+    this.repo.recordDbTrace({ requestId: traceContext?.requestId, operation: 'insert', entity: 'households', householdId: id });
     return household;
   }
 
   listHouseholdsForUser(userId) {
     this.ensureUser(userId);
-    return Array.from(this.memberships.get(userId)).map((id) => this.households.get(id));
+    return Array.from(this.repo.memberships.get(userId)).map((id) => this.repo.households.get(id));
   }
 
-  addMember({ actorId, householdId, memberId }) {
+  addMember({ actorId, householdId, memberId, traceContext = null }) {
     this.assertMember(actorId, householdId);
     this.ensureUser(memberId);
-    this.memberships.get(memberId).add(householdId);
+    this.repo.memberships.get(memberId).add(householdId);
     this.pushActivity(householdId, actorId, 'membership.added', `${actorId} shtoi ${memberId}`);
+    this.repo.recordDbTrace({ requestId: traceContext?.requestId, operation: 'insert', entity: 'household_members', householdId });
     return { householdId, memberId };
   }
 
   getItems({ userId, householdId }) {
     this.assertMember(userId, householdId);
-    return this.listItems.get(householdId) ?? [];
+    return this.repo.listItems.get(householdId) ?? [];
   }
 
-  addItem({ userId, householdId, name, quantity = 1 }) {
+  addItem({ userId, householdId, name, quantity = 1, traceContext = null }) {
     this.assertMember(userId, householdId);
     const item = {
       id: randomUUID(),
@@ -143,51 +138,67 @@ export class SmartCartStore {
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
-    this.listItems.get(householdId).push(item);
-    this.clearPricingCacheForHousehold(householdId);
+    this.repo.listItems.get(householdId).push(item);
+    void this.clearPricingCacheForHousehold(householdId);
     this.pushActivity(householdId, userId, 'list.item.added', `${userId} shtoi ${name}`);
+    this.repo.recordDbTrace({ requestId: traceContext?.requestId, operation: 'insert', entity: 'list_items', householdId });
     return item;
   }
 
-  toggleItem({ userId, householdId, itemId, expectedVersion }) {
+  toggleItem({ userId, householdId, itemId, expectedVersion, traceContext = null }) {
     this.assertMember(userId, householdId);
     const item = this.mustFindItem(householdId, itemId);
     if (expectedVersion !== undefined && expectedVersion !== item.version) throw new Error('VERSION_CONFLICT');
     item.purchased = !item.purchased;
     item.version += 1;
     item.updatedAt = new Date().toISOString();
-    this.clearPricingCacheForHousehold(householdId);
+    void this.clearPricingCacheForHousehold(householdId);
     this.pushActivity(householdId, userId, 'list.item.toggled', `${userId} ndryshoi ${item.name}`);
+    this.repo.recordDbTrace({ requestId: traceContext?.requestId, operation: 'update', entity: 'list_items', householdId });
     return item;
   }
 
   getActivity({ userId, householdId }) {
     this.assertMember(userId, householdId);
-    return this.activity.get(householdId) ?? [];
+    return this.repo.activity.get(householdId) ?? [];
   }
 
   getBudget({ userId, householdId }) {
     this.assertMember(userId, householdId);
-    return this.budgets.get(householdId);
+    return this.repo.budgets.get(householdId);
   }
 
-  setBudgetLimit({ userId, householdId, limit }) {
+  setBudgetLimit({ userId, householdId, limit, traceContext = null }) {
     this.assertMember(userId, householdId);
-    const budget = this.budgets.get(householdId);
+    const budget = this.repo.budgets.get(householdId);
     budget.limit = limit;
     budget.updatedAt = new Date().toISOString();
     this.pushActivity(householdId, userId, 'budget.updated', `${userId} ndryshoi buxhetin në ${limit}`);
+    this.repo.recordDbTrace({ requestId: traceContext?.requestId, operation: 'update', entity: 'monthly_budgets', householdId });
     return budget;
   }
 
-  addReceipt({ userId, householdId, store, items }) {
+
+  normalizeReceiptItems(items) {
+    return items.map((item) => {
+      const name = String(item?.name ?? '').trim();
+      const quantity = Number(item?.quantity ?? 1);
+      const unitPrice = Number(item?.unitPrice ?? 0);
+      if (!name) throw new Error('VALIDATION_RECEIPT_ITEM_NAME');
+      if (!Number.isFinite(quantity) || quantity <= 0) throw new Error('VALIDATION_RECEIPT_ITEM_QUANTITY');
+      if (!Number.isFinite(unitPrice) || unitPrice < 0) throw new Error('VALIDATION_RECEIPT_ITEM_UNITPRICE');
+      return {
+        name,
+        quantity,
+        unitPrice,
+        total: quantity * unitPrice,
+      };
+    });
+  }
+
+  addReceipt({ userId, householdId, store, items, traceContext = null }) {
     this.assertMember(userId, householdId);
-    const normalizedItems = items.map((item) => ({
-      name: item.name,
-      quantity: Number(item.quantity ?? 1),
-      unitPrice: Number(item.unitPrice ?? 0),
-      total: Number(item.quantity ?? 1) * Number(item.unitPrice ?? 0),
-    }));
+    const normalizedItems = this.normalizeReceiptItems(items);
     const total = normalizedItems.reduce((sum, item) => sum + item.total, 0);
     const receipt = {
       id: randomUUID(),
@@ -196,24 +207,25 @@ export class SmartCartStore {
       total: Number(total.toFixed(2)),
       createdAt: new Date().toISOString(),
     };
-    this.receipts.get(householdId).push(receipt);
+    this.repo.receipts.get(householdId).push(receipt);
 
-    const budget = this.budgets.get(householdId);
+    const budget = this.repo.budgets.get(householdId);
     budget.spent = Number((budget.spent + receipt.total).toFixed(2));
     budget.updatedAt = new Date().toISOString();
 
-    const pantryItems = this.pantry.get(householdId);
+    const pantryItems = this.repo.pantry.get(householdId);
     for (const item of normalizedItems) {
       pantryItems.push({ id: randomUUID(), name: item.name, quantity: item.quantity, addedAt: new Date().toISOString() });
       this.autoMarkPurchased(householdId, item.name);
     }
 
     this.pushActivity(householdId, userId, 'receipt.added', `${userId} regjistroi faturë ${receipt.total}€`);
+    this.repo.recordDbTrace({ requestId: traceContext?.requestId, operation: 'insert', entity: 'receipts', householdId });
     return { receipt, budget };
   }
 
 
-  createReceiptUploadUrl({ userId, householdId, fileName }) {
+  createReceiptUploadUrl({ userId, householdId, fileName, traceContext = null }) {
     this.assertMember(userId, householdId);
     const upload = {
       uploadId: randomUUID(),
@@ -223,12 +235,13 @@ export class SmartCartStore {
       expiresInSec: 900,
       createdAt: new Date().toISOString(),
     };
-    this.receiptUploads.get(householdId).push(upload);
+    this.repo.receiptUploads.get(householdId).push(upload);
     this.pushActivity(householdId, userId, 'receipt.upload.created', `${userId} krijoi upload URL për faturë`);
+    this.repo.recordDbTrace({ requestId: traceContext?.requestId, operation: 'insert', entity: 'receipt_uploads', householdId });
     return upload;
   }
 
-  enqueueReceiptOcrJob({ userId, householdId, objectKey, apiRequestId = null }) {
+  enqueueReceiptOcrJob({ userId, householdId, objectKey, apiRequestId = null, traceContext = null }) {
     this.assertMember(userId, householdId);
     const job = {
       jobId: randomUUID(),
@@ -249,8 +262,9 @@ export class SmartCartStore {
         applyRequestId: null,
       },
     };
-    this.receiptOcrJobs.get(householdId).push(job);
+    this.repo.receiptOcrJobs.get(householdId).push(job);
     this.pushActivity(householdId, userId, 'receipt.ocr.queued', `${userId} nisi OCR job`);
+    this.repo.recordDbTrace({ requestId: traceContext?.requestId, operation: 'insert', entity: 'receipt_ocr_jobs', householdId });
 
     setTimeout(() => {
       this.processReceiptOcrJob({ householdId, jobId: job.jobId });
@@ -260,7 +274,7 @@ export class SmartCartStore {
   }
 
   processReceiptOcrJob({ householdId, jobId }) {
-    const jobs = this.receiptOcrJobs.get(householdId) ?? [];
+    const jobs = this.repo.receiptOcrJobs.get(householdId) ?? [];
     const job = jobs.find((entry) => entry.jobId === jobId);
     if (!job || ['succeeded', 'succeeded_corrected', 'dead_letter'].includes(job.status)) return job;
 
@@ -300,6 +314,9 @@ export class SmartCartStore {
     return job;
   }
 
+  retryReceiptOcrJob({ userId, householdId, jobId, traceContext = null }) {
+    this.assertMember(userId, householdId);
+    const jobs = this.repo.receiptOcrJobs.get(householdId) ?? [];
   retryReceiptOcrJob({ userId, householdId, jobId }) {
     this.assertMember(userId, householdId);
     const jobs = this.receiptOcrJobs.get(householdId) ?? [];
@@ -310,6 +327,7 @@ export class SmartCartStore {
     job.status = 'queued';
     job.updatedAt = new Date().toISOString();
     this.pushActivity(householdId, userId, 'receipt.ocr.retried', `${userId} ritriggeroi OCR job`);
+    this.repo.recordDbTrace({ requestId: traceContext?.requestId, operation: 'update', entity: 'receipt_ocr_jobs', householdId });
 
     setTimeout(() => {
       this.processReceiptOcrJob({ householdId, jobId: job.jobId });
@@ -320,20 +338,20 @@ export class SmartCartStore {
 
   listReceiptOcrJobs({ userId, householdId }) {
     this.assertMember(userId, householdId);
-    return this.receiptOcrJobs.get(householdId) ?? [];
+    return this.repo.receiptOcrJobs.get(householdId) ?? [];
   }
 
-  correctReceiptOcrJob({ userId, householdId, jobId, store, items }) {
+  correctReceiptOcrJob({ userId, householdId, jobId, store, items, traceContext = null }) {
     this.assertMember(userId, householdId);
-    const jobs = this.receiptOcrJobs.get(householdId) ?? [];
+    const jobs = this.repo.receiptOcrJobs.get(householdId) ?? [];
     const job = jobs.find((entry) => entry.jobId === jobId);
     if (!job) throw new Error('OCR_JOB_NOT_FOUND');
     if (!['failed', 'dead_letter'].includes(job.status)) throw new Error('OCR_JOB_CORRECTION_NOT_ALLOWED');
 
-    const normalizedItems = items.map((item) => ({
+    const normalizedItems = this.normalizeReceiptItems(items).map((item) => ({
       name: item.name,
-      quantity: Number(item.quantity ?? 1),
-      unitPrice: Number(item.unitPrice ?? 0),
+      quantity: item.quantity,
+      unitPrice: item.unitPrice,
     }));
 
     job.correctedResult = {
@@ -344,13 +362,14 @@ export class SmartCartStore {
     job.status = 'succeeded_corrected';
     job.updatedAt = new Date().toISOString();
     this.pushActivity(householdId, userId, 'receipt.ocr.corrected', `${userId} korrigjoi manualisht OCR job`);
+    this.repo.recordDbTrace({ requestId: traceContext?.requestId, operation: 'update', entity: 'receipt_ocr_jobs', householdId });
 
     return job;
   }
 
-  applyReceiptOcrJobResult({ userId, householdId, jobId, applyRequestId = null }) {
+  applyReceiptOcrJobResult({ userId, householdId, jobId, applyRequestId = null, traceContext = null }) {
     this.assertMember(userId, householdId);
-    const jobs = this.receiptOcrJobs.get(householdId) ?? [];
+    const jobs = this.repo.receiptOcrJobs.get(householdId) ?? [];
     const job = jobs.find((entry) => entry.jobId === jobId);
     if (!job) throw new Error('OCR_JOB_NOT_FOUND');
 
@@ -362,33 +381,36 @@ export class SmartCartStore {
       householdId,
       store: source.store,
       items: source.items,
+      traceContext,
     });
 
     job.trace.applyRequestId = applyRequestId;
     this.pushActivity(householdId, userId, 'receipt.ocr.applied', `${userId} aplikoi OCR rezultatin`);
+    this.repo.recordDbTrace({ requestId: traceContext?.requestId, operation: 'update', entity: 'receipt_ocr_jobs', householdId });
     return { job, appliedReceipt: result.receipt, budget: result.budget };
   }
 
   listReceipts({ userId, householdId }) {
     this.assertMember(userId, householdId);
-    return this.receipts.get(householdId);
+    return this.repo.receipts.get(householdId);
   }
 
   getPantry({ userId, householdId }) {
     this.assertMember(userId, householdId);
-    return this.pantry.get(householdId);
+    return this.repo.pantry.get(householdId);
   }
 
-  addPantryItem({ userId, householdId, name, quantity = 1 }) {
+  addPantryItem({ userId, householdId, name, quantity = 1, traceContext = null }) {
     this.assertMember(userId, householdId);
     const item = { id: randomUUID(), name, quantity, addedAt: new Date().toISOString() };
-    this.pantry.get(householdId).push(item);
-    this.clearRecipeCacheForHousehold(householdId);
+    this.repo.pantry.get(householdId).push(item);
+    void this.clearRecipeCacheForHousehold(householdId);
     this.pushActivity(householdId, userId, 'pantry.item.added', `${userId} shtoi pantry item ${name}`);
+    this.repo.recordDbTrace({ requestId: traceContext?.requestId, operation: 'insert', entity: 'pantry_items', householdId });
     return item;
   }
 
-  ingestStagingPrices({ actorId, rows }) {
+  ingestStagingPrices({ actorId, rows, traceContext = null }) {
     const prepared = rows.map((row) => {
       const canonicalKey = this.canonicalizeItemKey(row.itemKey ?? '');
       return {
@@ -405,18 +427,22 @@ export class SmartCartStore {
         actorId,
       };
     });
-    return this.priceRepository.ingest({ rows: prepared });
+    const result = this.priceRepository.ingest({ rows: prepared });
+    this.repo.recordDbTrace({ requestId: traceContext?.requestId, operation: 'insert', entity: 'prices_staging', householdId: null });
+    return result;
   }
 
-  promoteStagingPrices({ actorId }) {
+  promoteStagingPrices({ actorId, traceContext = null }) {
     const result = this.priceRepository.promoteValidated({ actorId });
     this.pricingEstimateCache.clear();
+    this.repo.recordDbTrace({ requestId: traceContext?.requestId, operation: 'promote', entity: 'store_prices_live', householdId: null });
+    if (this.cache) void this.cache.delByPrefix('pricing:');
     return result;
   }
 
 
   getOcrQueueDepth() {
-    const jobs = Array.from(this.receiptOcrJobs.values()).flat();
+    const jobs = Array.from(this.repo.receiptOcrJobs.values()).flat();
     return {
       total: jobs.length,
       queued: jobs.filter((entry) => entry.status === 'queued').length,
@@ -443,9 +469,9 @@ export class SmartCartStore {
     };
   }
 
-  estimatePrices({ userId, householdId, refresh = false }) {
+  async estimatePrices({ userId, householdId, refresh = false }) {
     this.assertMember(userId, householdId);
-    const activeItems = (this.listItems.get(householdId) ?? []).filter((item) => !item.purchased);
+    const activeItems = (this.repo.listItems.get(householdId) ?? []).filter((item) => !item.purchased);
     const signature = activeItems
       .map((item) => `${this.canonicalizeItemKey(item.name)}:${item.quantity}:${item.version}`)
       .sort()
@@ -454,6 +480,17 @@ export class SmartCartStore {
     const now = Date.now();
 
     if (!refresh) {
+      if (this.cache) {
+        const redisCached = await this.cache.getJson(`pricing:${cacheKey}`);
+        if (redisCached) {
+          return {
+            ...redisCached,
+            cached: true,
+            cacheTtlSecRemaining: PRICING_CACHE_TTL_MS / 1000,
+          };
+        }
+      }
+
       const cached = this.pricingEstimateCache.get(cacheKey);
       if (cached && cached.expiresAt > now) {
         return {
@@ -485,6 +522,7 @@ export class SmartCartStore {
       payload,
       expiresAt: now + PRICING_CACHE_TTL_MS,
     });
+    if (this.cache) await this.cache.setJson(`pricing:${cacheKey}`, payload, PRICING_CACHE_TTL_MS / 1000);
 
     return {
       ...payload,
@@ -495,14 +533,14 @@ export class SmartCartStore {
 
   listFlyers({ userId, householdId }) {
     this.assertMember(userId, householdId);
-    const items = this.listItems.get(householdId).map((item) => this.normalizeName(item.name));
+    const items = this.repo.listItems.get(householdId).map((item) => this.normalizeName(item.name));
     return this.flyers.filter((flyer) => items.some((item) => item.includes(flyer.keyword)));
   }
 
-  suggestRecipes({ userId, householdId, refresh = false }) {
+  async suggestRecipes({ userId, householdId, refresh = false }) {
     this.assertMember(userId, householdId);
     this.checkRecipeLimit(userId);
-    const pantry = this.pantry.get(householdId);
+    const pantry = this.repo.pantry.get(householdId);
     const pantrySignature = pantry
       .map((item) => `${this.canonicalizeItemKey(item.name)}:${item.quantity}`)
       .sort()
@@ -511,6 +549,18 @@ export class SmartCartStore {
     const now = Date.now();
 
     if (!refresh) {
+      if (this.cache) {
+        const redisCached = await this.cache.getJson(`recipes:${cacheKey}`);
+        if (redisCached) {
+          return {
+            ...redisCached,
+            cached: true,
+            cacheTtlSecRemaining: RECIPE_CACHE_TTL_MS / 1000,
+            promptTemplates: redisCached.suggestions.map((item) => ({ name: item.name, template: item.promptTemplate })),
+          };
+        }
+      }
+
       const cached = this.recipeSuggestionCache.get(cacheKey);
       if (cached && cached.expiresAt > now) {
         return {
@@ -524,18 +574,23 @@ export class SmartCartStore {
 
     const names = pantry.map((item) => this.normalizeName(item.name));
 
-    const suggestions = [];
-    if (names.includes('domate') && names.includes('veze')) suggestions.push(RECIPE_TEMPLATES.shakshuka);
-    if (names.includes('mish') && names.includes('oriz')) suggestions.push(RECIPE_TEMPLATES.pilaf_mish);
-    if (suggestions.length === 0) suggestions.push(RECIPE_TEMPLATES.omlete_miks);
+    const fallbackSuggestions = [];
+    if (names.includes('domate') && names.includes('veze')) fallbackSuggestions.push(RECIPE_TEMPLATES.shakshuka);
+    if (names.includes('mish') && names.includes('oriz')) fallbackSuggestions.push(RECIPE_TEMPLATES.pilaf_mish);
+    if (fallbackSuggestions.length === 0) fallbackSuggestions.push(RECIPE_TEMPLATES.omlete_miks);
 
-    const payload = {
-      suggestions: suggestions.map((entry) => ({
+    const aiSuggestions = await generateRecipeSuggestions({
+      pantryNames: names,
+      fallbackSuggestions: fallbackSuggestions.map((entry) => ({
         key: entry.key,
         name: entry.name,
         etaMin: entry.etaMin,
         promptTemplate: entry.promptTemplate,
       })),
+    });
+
+    const payload = {
+      suggestions: aiSuggestions,
       remainingFreeRequests: 3 - this.getTodayRecipeUsage(userId),
     };
 
@@ -543,6 +598,7 @@ export class SmartCartStore {
       payload,
       expiresAt: now + RECIPE_CACHE_TTL_MS,
     });
+    if (this.cache) await this.cache.setJson(`recipes:${cacheKey}`, payload, RECIPE_CACHE_TTL_MS / 1000);
 
     this.pushActivity(householdId, userId, 'recipes.generated', `${userId} kërkoi receta AI`);
     return {
@@ -553,13 +609,13 @@ export class SmartCartStore {
     };
   }
 
-  addRecipeIngredientsToList({ userId, householdId, recipeKey }) {
+  addRecipeIngredientsToList({ userId, householdId, recipeKey, traceContext = null }) {
     this.assertMember(userId, householdId);
     const template = RECIPE_TEMPLATES[recipeKey];
     if (!template) throw new Error('RECIPE_NOT_FOUND');
 
-    const pantry = this.pantry.get(householdId) ?? [];
-    const items = this.listItems.get(householdId) ?? [];
+    const pantry = this.repo.pantry.get(householdId) ?? [];
+    const items = this.repo.listItems.get(householdId) ?? [];
     const added = [];
 
     for (const ingredient of template.ingredients) {
@@ -572,7 +628,12 @@ export class SmartCartStore {
     }
 
     this.pushActivity(householdId, userId, 'recipes.added_to_list', `${userId} shtoi përbërësit e recetës ${template.name}`);
+    this.repo.recordDbTrace({ requestId: traceContext?.requestId, operation: 'insert', entity: 'list_items', householdId });
     return { recipe: template.name, addedItems: added };
+  }
+
+  getTraceReport({ requestId }) {
+    return this.repo.getDbTrace(requestId);
   }
 
   getRecipeCacheStatus() {
@@ -596,7 +657,7 @@ export class SmartCartStore {
 
   assertMember(userId, householdId) {
     this.ensureUser(userId);
-    if (!this.memberships.get(userId).has(householdId)) throw new Error('FORBIDDEN_HOUSEHOLD_ACCESS');
+    if (!this.repo.memberships.get(userId).has(householdId)) throw new Error('FORBIDDEN_HOUSEHOLD_ACCESS');
   }
 
   pushActivity(householdId, actorId, type, message) {
@@ -608,20 +669,22 @@ export class SmartCartStore {
       createdAt: new Date().toISOString(),
       householdId,
     };
-    this.activity.get(householdId).push(event);
+    this.repo.activity.get(householdId).push(event);
     this.events.emit(`household:${householdId}`, event);
   }
 
-  clearPricingCacheForHousehold(householdId) {
+  async clearPricingCacheForHousehold(householdId) {
     for (const key of this.pricingEstimateCache.keys()) {
       if (key.startsWith(`${householdId}:`)) this.pricingEstimateCache.delete(key);
     }
+    if (this.cache) await this.cache.delByPrefix(`pricing:${householdId}:`);
   }
 
-  clearRecipeCacheForHousehold(householdId) {
+  async clearRecipeCacheForHousehold(householdId) {
     for (const key of this.recipeSuggestionCache.keys()) {
       if (key.startsWith(`${householdId}:`)) this.recipeSuggestionCache.delete(key);
     }
+    if (this.cache) await this.cache.delByPrefix(`recipes:${householdId}:`);
   }
 
   resolveCategory(itemName) {
@@ -665,33 +728,33 @@ export class SmartCartStore {
   }
 
   mustFindItem(householdId, itemId) {
-    const item = (this.listItems.get(householdId) ?? []).find((entry) => entry.id === itemId);
+    const item = (this.repo.listItems.get(householdId) ?? []).find((entry) => entry.id === itemId);
     if (!item) throw new Error('ITEM_NOT_FOUND');
     return item;
   }
 
   autoMarkPurchased(householdId, itemName) {
     const normalized = this.canonicalizeItemKey(itemName);
-    const item = (this.listItems.get(householdId) ?? []).find(
+    const item = (this.repo.listItems.get(householdId) ?? []).find(
       (entry) => this.canonicalizeItemKey(entry.name) === normalized && !entry.purchased,
     );
     if (item) {
       item.purchased = true;
       item.version += 1;
       item.updatedAt = new Date().toISOString();
-      this.clearPricingCacheForHousehold(householdId);
+      void this.clearPricingCacheForHousehold(householdId);
     }
   }
 
   checkRecipeLimit(userId) {
     const key = `${userId}:${this.currentDateKey()}`;
-    const used = this.recipeUsage.get(key) ?? 0;
+    const used = this.repo.recipeUsage.get(key) ?? 0;
     if (used >= 3) throw new Error('AI_RATE_LIMIT');
-    this.recipeUsage.set(key, used + 1);
+    this.repo.recipeUsage.set(key, used + 1);
   }
 
   getTodayRecipeUsage(userId) {
-    return this.recipeUsage.get(`${userId}:${this.currentDateKey()}`) ?? 0;
+    return this.repo.recipeUsage.get(`${userId}:${this.currentDateKey()}`) ?? 0;
   }
 
   currentMonth() {

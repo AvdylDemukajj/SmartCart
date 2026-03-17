@@ -1,9 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import http from 'node:http';
+import { createHash } from 'node:crypto';
 import { URL } from 'node:url';
 import { SmartCartStore } from './store.js';
 import { FixedWindowRateLimiter, resolveUserId } from './security.js';
 import { InMemoryTelemetry } from './telemetry.js';
+import { createCacheFromEnv } from './cache.js';
+import { addItemSchema, addMemberSchema, addPantrySchema, addReceiptSchema, correctOcrSchema, createHouseholdSchema, enqueueOcrSchema, parseBody, pricingStagingSchema, setBudgetSchema, toggleItemSchema, uploadUrlSchema } from './validation.js';
 
 function readBody(req) {
   return new Promise((resolve, reject) => {
@@ -46,12 +49,51 @@ function writeSseEvent(res, event) {
   res.write(`data: ${JSON.stringify(event)}\n\n`);
 }
 
-function assertNonEmptyString(value, fieldName) {
-  if (typeof value !== 'string' || !value.trim()) throw new Error(`VALIDATION_${fieldName.toUpperCase()}`);
+
+function websocketAcceptKey(secWebSocketKey) {
+  return createHash('sha1').update(`${secWebSocketKey}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest('base64');
 }
 
-function assertPositiveNumber(value, fieldName) {
-  if (typeof value !== 'number' || Number.isNaN(value) || value <= 0) throw new Error(`VALIDATION_${fieldName.toUpperCase()}`);
+function encodeWsTextFrame(text) {
+  const payload = Buffer.from(text, 'utf8');
+  const length = payload.length;
+  if (length < 126) {
+    return Buffer.concat([Buffer.from([0x81, length]), payload]);
+  }
+  if (length < 65536) {
+    const header = Buffer.from([0x81, 126, (length >> 8) & 0xff, length & 0xff]);
+    return Buffer.concat([header, payload]);
+  }
+  const header = Buffer.alloc(10);
+  header[0] = 0x81;
+  header[1] = 127;
+  header.writeBigUInt64BE(BigInt(length), 2);
+  return Buffer.concat([header, payload]);
+}
+
+
+function parseRefreshFlag(url) {
+  const value = url.searchParams.get('refresh');
+  if (value === null) return false;
+  if (value === '1' || value === 'true') return true;
+  if (value === '0' || value === 'false') return false;
+  throw new Error('VALIDATION_QUERY_REFRESH');
+}
+
+function parsePositiveIntQuery(value, fallback) {
+  if (value === null) return fallback;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) throw new Error('VALIDATION_QUERY_LIMIT');
+  return parsed;
+}
+
+function canAccessAuditLog(req, userId) {
+  const adminUser = process.env.SECURITY_AUDIT_ADMIN_USER_ID ?? 'admin';
+  if (userId === adminUser) return true;
+  const configuredKey = process.env.SECURITY_AUDIT_ADMIN_KEY;
+  if (!configuredKey) return false;
+  const key = req.headers['x-admin-key'];
+  return typeof key === 'string' && key === configuredKey;
 }
 
 function logRequest({ requestId, method, path, userId, status, error }) {
@@ -69,7 +111,7 @@ function logRequest({ requestId, method, path, userId, status, error }) {
 }
 
 export function createApp(config = {}) {
-  const store = new SmartCartStore();
+  const store = new SmartCartStore({ cache: config.cache ?? null });
   const globalLimiter = new FixedWindowRateLimiter({
     limit: config.globalRateLimit ?? 120,
     windowMs: config.globalRateWindowMs ?? 60_000,
@@ -80,7 +122,7 @@ export function createApp(config = {}) {
   });
   const telemetry = new InMemoryTelemetry();
 
-  return http.createServer(async (req, res) => {
+  const server = http.createServer(async (req, res) => {
     const requestId = randomUUID();
     const method = req.method || 'GET';
     const url = new URL(req.url || '/', 'http://localhost');
@@ -109,6 +151,15 @@ export function createApp(config = {}) {
         return sendJson(res, 200, payload, requestId);
       }
 
+      if (method === 'GET' && /^\/trace\/[^/]+$/.test(url.pathname)) {
+        const traceRequestId = url.pathname.split('/')[2];
+        userId = resolveUserId(req);
+        if (!userId || !canAccessAuditLog(req, userId)) throw new Error('FORBIDDEN_AUDIT_ACCESS');
+        const payload = store.getTraceReport({ requestId: traceRequestId });
+        logRequest({ requestId, method, path: url.pathname, userId, status: 200 });
+        return sendJson(res, 200, payload, requestId);
+      }
+
       userId = resolveUserId(req);
       if (!userId) {
         logRequest({ requestId, method, path: url.pathname, userId: null, status: 401, error: 'UNAUTHORIZED' });
@@ -124,9 +175,8 @@ export function createApp(config = {}) {
       }
 
       if (url.pathname === '/households' && method === 'POST') {
-        const body = await readBody(req);
-        assertNonEmptyString(body.name, 'name');
-        const payload = store.createHousehold({ ownerId: userId, name: body.name });
+        const body = parseBody(createHouseholdSchema, await readBody(req));
+        const payload = store.createHousehold({ ownerId: userId, name: body.name, traceContext: { requestId } });
         logRequest({ requestId, method, path: url.pathname, userId, status: 201 });
         return sendJson(res, 201, payload, requestId);
       }
@@ -139,15 +189,15 @@ export function createApp(config = {}) {
 
       if (method === 'POST' && /^\/households\/[^/]+\/members$/.test(url.pathname)) {
         const householdId = url.pathname.split('/')[2];
-        const body = await readBody(req);
-        assertNonEmptyString(body.memberId, 'memberId');
-        const payload = store.addMember({ actorId: userId, householdId, memberId: body.memberId });
+        const body = parseBody(addMemberSchema, await readBody(req));
+        const payload = store.addMember({ actorId: userId, householdId, memberId: body.memberId, traceContext: { requestId } });
         logRequest({ requestId, method, path: url.pathname, userId, status: 201 });
         return sendJson(res, 201, payload, requestId);
       }
 
       if (method === 'GET' && url.pathname === '/security/audit-log') {
-        const payload = store.getSecurityAuditLog({ userId, limit: Number(url.searchParams.get('limit') ?? 100) });
+        if (!canAccessAuditLog(req, userId)) throw new Error('FORBIDDEN_AUDIT_ACCESS');
+        const payload = store.getSecurityAuditLog({ userId, limit: parsePositiveIntQuery(url.searchParams.get('limit'), 100) });
         logRequest({ requestId, method, path: url.pathname, userId, status: 200 });
         return sendJson(res, 200, payload, requestId);
       }
@@ -161,18 +211,16 @@ export function createApp(config = {}) {
 
       if (method === 'POST' && /^\/households\/[^/]+\/items$/.test(url.pathname)) {
         const householdId = url.pathname.split('/')[2];
-        const body = await readBody(req);
-        assertNonEmptyString(body.name, 'name');
-        if (body.quantity !== undefined) assertPositiveNumber(body.quantity, 'quantity');
-        const payload = store.addItem({ userId, householdId, name: body.name, quantity: body.quantity ?? 1 });
+        const body = parseBody(addItemSchema, await readBody(req));
+        const payload = store.addItem({ userId, householdId, name: body.name, quantity: body.quantity ?? 1, traceContext: { requestId } });
         logRequest({ requestId, method, path: url.pathname, userId, status: 201 });
         return sendJson(res, 201, payload, requestId);
       }
 
       if (method === 'PATCH' && /^\/households\/[^/]+\/items\/[^/]+$/.test(url.pathname)) {
         const [, , householdId, , itemId] = url.pathname.split('/');
-        const body = await readBody(req);
-        const payload = store.toggleItem({ userId, householdId, itemId, expectedVersion: body.expectedVersion });
+        const body = parseBody(toggleItemSchema, await readBody(req));
+        const payload = store.toggleItem({ userId, householdId, itemId, expectedVersion: body.expectedVersion, traceContext: { requestId } });
         logRequest({ requestId, method, path: url.pathname, userId, status: 200 });
         return sendJson(res, 200, payload, requestId);
       }
@@ -216,9 +264,8 @@ export function createApp(config = {}) {
 
       if (method === 'PUT' && /^\/households\/[^/]+\/budget$/.test(url.pathname)) {
         const householdId = url.pathname.split('/')[2];
-        const body = await readBody(req);
-        assertPositiveNumber(body.limit, 'limit');
-        const payload = store.setBudgetLimit({ userId, householdId, limit: body.limit });
+        const body = parseBody(setBudgetSchema, await readBody(req));
+        const payload = store.setBudgetLimit({ userId, householdId, limit: body.limit, traceContext: { requestId } });
         logRequest({ requestId, method, path: url.pathname, userId, status: 200 });
         return sendJson(res, 200, payload, requestId);
       }
@@ -226,18 +273,16 @@ export function createApp(config = {}) {
 
       if (method === 'POST' && /^\/households\/[^/]+\/receipts\/upload-url$/.test(url.pathname)) {
         const householdId = url.pathname.split('/')[2];
-        const body = await readBody(req);
-        assertNonEmptyString(body.fileName, 'fileName');
-        const payload = store.createReceiptUploadUrl({ userId, householdId, fileName: body.fileName });
+        const body = parseBody(uploadUrlSchema, await readBody(req));
+        const payload = store.createReceiptUploadUrl({ userId, householdId, fileName: body.fileName, traceContext: { requestId } });
         logRequest({ requestId, method, path: url.pathname, userId, status: 201 });
         return sendJson(res, 201, payload, requestId);
       }
 
       if (method === 'POST' && /^\/households\/[^/]+\/receipts\/ocr-jobs$/.test(url.pathname)) {
         const householdId = url.pathname.split('/')[2];
-        const body = await readBody(req);
-        assertNonEmptyString(body.objectKey, 'objectKey');
-        const payload = store.enqueueReceiptOcrJob({ userId, householdId, objectKey: body.objectKey, apiRequestId: requestId });
+        const body = parseBody(enqueueOcrSchema, await readBody(req));
+        const payload = store.enqueueReceiptOcrJob({ userId, householdId, objectKey: body.objectKey, apiRequestId: requestId, traceContext: { requestId } });
         logRequest({ requestId, method, path: url.pathname, userId, status: 202 });
         return sendJson(res, 202, payload, requestId);
       }
@@ -252,33 +297,30 @@ export function createApp(config = {}) {
 
       if (method === 'POST' && /^\/households\/[^/]+\/receipts\/ocr-jobs\/[^/]+\/retry$/.test(url.pathname)) {
         const [, , householdId, , , jobId] = url.pathname.split('/');
-        const payload = store.retryReceiptOcrJob({ userId, householdId, jobId });
+        const payload = store.retryReceiptOcrJob({ userId, householdId, jobId, traceContext: { requestId } });
         logRequest({ requestId, method, path: url.pathname, userId, status: 202 });
         return sendJson(res, 202, payload, requestId);
       }
 
       if (method === 'PATCH' && /^\/households\/[^/]+\/receipts\/ocr-jobs\/[^/]+\/correct$/.test(url.pathname)) {
         const [, , householdId, , , jobId] = url.pathname.split('/');
-        const body = await readBody(req);
-        assertNonEmptyString(body.store, 'store');
-        if (!Array.isArray(body.items) || body.items.length === 0) throw new Error('VALIDATION_ITEMS');
-        const payload = store.correctReceiptOcrJob({ userId, householdId, jobId, store: body.store, items: body.items });
+        const body = parseBody(correctOcrSchema, await readBody(req));
+        const payload = store.correctReceiptOcrJob({ userId, householdId, jobId, store: body.store, items: body.items, traceContext: { requestId } });
         logRequest({ requestId, method, path: url.pathname, userId, status: 200 });
         return sendJson(res, 200, payload, requestId);
       }
 
       if (method === 'POST' && /^\/households\/[^/]+\/receipts\/ocr-jobs\/[^/]+\/apply$/.test(url.pathname)) {
         const [, , householdId, , , jobId] = url.pathname.split('/');
-        const payload = store.applyReceiptOcrJobResult({ userId, householdId, jobId, applyRequestId: requestId });
+        const payload = store.applyReceiptOcrJobResult({ userId, householdId, jobId, applyRequestId: requestId, traceContext: { requestId } });
         logRequest({ requestId, method, path: url.pathname, userId, status: 200 });
         return sendJson(res, 200, payload, requestId);
       }
 
       if (method === 'POST' && /^\/households\/[^/]+\/receipts$/.test(url.pathname)) {
         const householdId = url.pathname.split('/')[2];
-        const body = await readBody(req);
-        if (!Array.isArray(body.items) || body.items.length === 0) throw new Error('VALIDATION_ITEMS');
-        const payload = store.addReceipt({ userId, householdId, store: body.store ?? 'unknown', items: body.items });
+        const body = parseBody(addReceiptSchema, await readBody(req));
+        const payload = store.addReceipt({ userId, householdId, store: body.store ?? 'unknown', items: body.items, traceContext: { requestId } });
         logRequest({ requestId, method, path: url.pathname, userId, status: 201 });
         return sendJson(res, 201, payload, requestId);
       }
@@ -299,18 +341,16 @@ export function createApp(config = {}) {
 
       if (method === 'POST' && /^\/households\/[^/]+\/pantry$/.test(url.pathname)) {
         const householdId = url.pathname.split('/')[2];
-        const body = await readBody(req);
-        assertNonEmptyString(body.name, 'name');
-        if (body.quantity !== undefined) assertPositiveNumber(body.quantity, 'quantity');
-        const payload = store.addPantryItem({ userId, householdId, name: body.name, quantity: body.quantity ?? 1 });
+        const body = parseBody(addPantrySchema, await readBody(req));
+        const payload = store.addPantryItem({ userId, householdId, name: body.name, quantity: body.quantity ?? 1, traceContext: { requestId } });
         logRequest({ requestId, method, path: url.pathname, userId, status: 201 });
         return sendJson(res, 201, payload, requestId);
       }
 
       if (method === 'GET' && /^\/households\/[^/]+\/pricing\/estimate$/.test(url.pathname)) {
         const householdId = url.pathname.split('/')[2];
-        const refresh = url.searchParams.get('refresh') === '1';
-        const payload = store.estimatePrices({ userId, householdId, refresh });
+        const refresh = parseRefreshFlag(url);
+        const payload = await store.estimatePrices({ userId, householdId, refresh });
         logRequest({ requestId, method, path: url.pathname, userId, status: 200 });
         return sendJson(res, 200, payload, requestId);
       }
@@ -325,7 +365,7 @@ export function createApp(config = {}) {
 
       if (method === 'POST' && /^\/households\/[^/]+\/recipes\/[^/]+\/add-to-list$/.test(url.pathname)) {
         const [, , householdId, , recipeKey] = url.pathname.split('/');
-        const payload = store.addRecipeIngredientsToList({ userId, householdId, recipeKey });
+        const payload = store.addRecipeIngredientsToList({ userId, householdId, recipeKey, traceContext: { requestId } });
         logRequest({ requestId, method, path: url.pathname, userId, status: 200 });
         return sendJson(res, 200, payload, requestId);
       }
@@ -338,8 +378,8 @@ export function createApp(config = {}) {
 
       if (method === 'POST' && /^\/households\/[^/]+\/recipes\/suggest$/.test(url.pathname)) {
         const householdId = url.pathname.split('/')[2];
-        const refresh = url.searchParams.get('refresh') === '1';
-        const payload = store.suggestRecipes({ userId, householdId, refresh });
+        const refresh = parseRefreshFlag(url);
+        const payload = await store.suggestRecipes({ userId, householdId, refresh });
         logRequest({ requestId, method, path: url.pathname, userId, status: 200 });
         return sendJson(res, 200, payload, requestId);
       }
@@ -359,15 +399,14 @@ export function createApp(config = {}) {
       }
 
       if (method === 'POST' && url.pathname === '/pricing/staging') {
-        const body = await readBody(req);
-        if (!Array.isArray(body.rows) || body.rows.length === 0) throw new Error('VALIDATION_ROWS');
-        const payload = store.ingestStagingPrices({ actorId: userId, rows: body.rows });
+        const body = parseBody(pricingStagingSchema, await readBody(req));
+        const payload = store.ingestStagingPrices({ actorId: userId, rows: body.rows, traceContext: { requestId } });
         logRequest({ requestId, method, path: url.pathname, userId, status: 201 });
         return sendJson(res, 201, { ingested: payload.length }, requestId);
       }
 
       if (method === 'POST' && url.pathname === '/pricing/promote') {
-        const payload = store.promoteStagingPrices({ actorId: userId });
+        const payload = store.promoteStagingPrices({ actorId: userId, traceContext: { requestId } });
         logRequest({ requestId, method, path: url.pathname, userId, status: 200 });
         return sendJson(res, 200, payload, requestId);
       }
@@ -378,6 +417,11 @@ export function createApp(config = {}) {
       const message = error?.message ?? 'UNKNOWN_ERROR';
       if (message === 'FORBIDDEN_HOUSEHOLD_ACCESS') {
         store.recordSecurityAudit({ event: 'forbidden_household_access', requestId, userId, path: url.pathname });
+        logRequest({ requestId, method, path: url.pathname, userId, status: 403, error: message });
+        return sendJson(res, 403, { error: 'Forbidden' }, requestId);
+      }
+      if (message === 'FORBIDDEN_AUDIT_ACCESS') {
+        store.recordSecurityAudit({ event: 'forbidden_audit_access', requestId, userId, path: url.pathname });
         logRequest({ requestId, method, path: url.pathname, userId, status: 403, error: message });
         return sendJson(res, 403, { error: 'Forbidden' }, requestId);
       }
@@ -440,12 +484,68 @@ export function createApp(config = {}) {
       return sendJson(res, 500, { error: 'Internal server error' }, requestId);
     }
   });
+
+  const wsConnections = new Map();
+
+  server.on('upgrade', (req, socket) => {
+    try {
+      const url = new URL(req.url || '/', 'http://localhost');
+      if (!/^\/ws\/households\/[^/]+$/.test(url.pathname)) {
+        socket.destroy();
+        return;
+      }
+      const householdId = url.pathname.split('/')[3];
+      const userId = resolveUserId(req);
+      if (!userId) {
+        socket.destroy();
+        return;
+      }
+      store.assertMember(userId, householdId);
+
+      const wsKey = req.headers['sec-websocket-key'];
+      if (typeof wsKey !== 'string') {
+        socket.destroy();
+        return;
+      }
+
+      const accept = websocketAcceptKey(wsKey);
+      socket.write(
+        'HTTP/1.1 101 Switching Protocols\r\n' +
+          'Upgrade: websocket\r\n' +
+          'Connection: Upgrade\r\n' +
+          `Sec-WebSocket-Accept: ${accept}\r\n\r\n`,
+      );
+
+      const unsubscribe = store.onHouseholdEvent(householdId, (event) => {
+        if (!socket.destroyed) socket.write(encodeWsTextFrame(JSON.stringify({ type: 'activity', event })));
+      });
+
+      wsConnections.set(socket, unsubscribe);
+      const cleanup = () => {
+        const fn = wsConnections.get(socket);
+        if (fn) fn();
+        wsConnections.delete(socket);
+      };
+      socket.on('close', cleanup);
+      socket.on('end', cleanup);
+      socket.on('error', cleanup);
+    } catch {
+      socket.destroy();
+    }
+  });
+
+
+
+
+  return server;
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   const port = Number(process.env.PORT || 4000);
-  createApp().listen(port, () => {
-    // eslint-disable-next-line no-console
-    console.log(`SmartCart backend listening on ${port}`);
+  createCacheFromEnv().then((cache) => {
+    createApp({ cache }).listen(port, () => {
+      // eslint-disable-next-line no-console
+      console.log(`SmartCart backend listening on ${port}`);
+    });
   });
 }
