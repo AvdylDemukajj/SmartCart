@@ -1,0 +1,12 @@
+config:
+  target: "{{ $processEnvironment.BASE_URL || 'http://127.0.0.1:4000' }}"
+  phases:
+    - duration: 30
+      arrivalRate: 5
+scenarios:
+  - name: health-and-metrics
+    flow:
+      - get:
+          url: "/health"
+      - get:
+          url: "/metrics"
