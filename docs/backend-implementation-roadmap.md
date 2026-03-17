@@ -88,3 +88,5 @@ Ky roadmap e ndan backend-in në hapa të menaxhueshëm që të ndërtohet gradu
 - [x] OCR retry/dead-letter + manual correction flow.
 - [x] Recipe cache + recipe-to-list expansion API.
 - [x] Phase 6 scaffold: Drizzle schema + initial migration + pricing repository split.
+
+50
