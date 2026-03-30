@@ -22,6 +22,25 @@ const STARTER_FLYERS = [
   { id: 'fl-viva-domate', store: 'viva', keyword: 'domate', discountPercent: 15, label: '🔥 -15% Viva këtë javë' },
 ];
 
+const BARCODE_CATALOG = {
+  ks: {
+    '3901234500011': { name: 'Qumesht', category: 'Bulmet' },
+    '3901234500012': { name: 'Veze', category: 'Bulmet' },
+    '3901234500013': { name: 'Buke', category: 'Bazike' },
+  },
+  al: {
+    '3901234500011': { name: 'Qumësht', category: 'Bulmet' },
+    '3901234500014': { name: 'Domate', category: 'Fruta/Perime' },
+  },
+  de: {
+    '4006381333931': { name: 'Milch', category: 'Bulmet' },
+    '4311501650701': { name: 'Eier', category: 'Bulmet' },
+  },
+};
+const BARCODE_PREFIX_FALLBACK = {
+  '3901234': { name: 'Produkt bazik', category: 'Të tjera', confidence: 0.55 },
+};
+
 const PRICING_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 const RECIPE_CACHE_TTL_MS = 60 * 60 * 1000;
 
@@ -61,9 +80,10 @@ const RECIPE_TEMPLATES = {
 };
 
 export class SmartCartStore {
-  constructor({ cache = null } = {}) {
+  constructor({ cache = null, coreRepository = null } = {}) {
     this.events = new EventEmitter();
     this.repo = new InMemoryAppRepository();
+    this.coreRepository = coreRepository;
     this.recipeSuggestionCache = new Map();
     this.flyers = STARTER_FLYERS;
     this.pricingEstimateCache = new Map();
@@ -89,9 +109,19 @@ export class SmartCartStore {
     if (!this.repo.memberships.has(userId)) this.repo.memberships.set(userId, new Set());
   }
 
-  createHousehold({ ownerId, name, traceContext = null }) {
+  async createHousehold({ ownerId, name, traceContext = null }) {
     const id = randomUUID();
-    const household = { id, name, ownerId, createdAt: new Date().toISOString() };
+    const createdAt = new Date().toISOString();
+    const household = { id, name, ownerId, createdAt };
+    if (this.coreRepository) {
+      await this.coreRepository.createHousehold({
+        id,
+        name,
+        ownerId,
+        createdAt,
+        month: this.currentMonth(),
+      });
+    }
     this.repo.households.set(id, household);
     this.ensureUser(ownerId);
     this.repo.memberships.get(ownerId).add(id);
@@ -102,32 +132,35 @@ export class SmartCartStore {
     this.repo.pantry.set(id, []);
     this.repo.receiptUploads.set(id, []);
     this.repo.receiptOcrJobs.set(id, []);
-    this.pushActivity(id, ownerId, 'household.created', `${ownerId} krijoi household-in`);
+    await this.pushActivity(id, ownerId, 'household.created', `${ownerId} krijoi household-in`);
     this.repo.recordDbTrace({ requestId: traceContext?.requestId, operation: 'insert', entity: 'households', householdId: id });
     return household;
   }
 
-  listHouseholdsForUser(userId) {
+  async listHouseholdsForUser(userId) {
+    if (this.coreRepository) return this.coreRepository.listUserHouseholds(userId);
     this.ensureUser(userId);
     return Array.from(this.repo.memberships.get(userId)).map((id) => this.repo.households.get(id));
   }
 
-  addMember({ actorId, householdId, memberId, traceContext = null }) {
-    this.assertMember(actorId, householdId);
+  async addMember({ actorId, householdId, memberId, traceContext = null }) {
+    await this.assertMember(actorId, householdId);
+    if (this.coreRepository) await this.coreRepository.addMember({ householdId, memberId });
     this.ensureUser(memberId);
     this.repo.memberships.get(memberId).add(householdId);
-    this.pushActivity(householdId, actorId, 'membership.added', `${actorId} shtoi ${memberId}`);
+    await this.pushActivity(householdId, actorId, 'membership.added', `${actorId} shtoi ${memberId}`);
     this.repo.recordDbTrace({ requestId: traceContext?.requestId, operation: 'insert', entity: 'household_members', householdId });
     return { householdId, memberId };
   }
 
-  getItems({ userId, householdId }) {
-    this.assertMember(userId, householdId);
+  async getItems({ userId, householdId }) {
+    await this.assertMember(userId, householdId);
+    if (this.coreRepository) return this.coreRepository.listItems({ householdId });
     return this.repo.listItems.get(householdId) ?? [];
   }
 
-  addItem({ userId, householdId, name, quantity = 1, traceContext = null }) {
-    this.assertMember(userId, householdId);
+  async addItem({ userId, householdId, name, quantity = 1, traceContext = null }) {
+    await this.assertMember(userId, householdId);
     const item = {
       id: randomUUID(),
       name,
@@ -138,42 +171,77 @@ export class SmartCartStore {
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
+    if (this.coreRepository) {
+      await this.coreRepository.addItem({
+        id: item.id,
+        householdId,
+        name: item.name,
+        quantity: item.quantity,
+        category: item.category,
+        purchased: item.purchased,
+        createdAt: item.createdAt,
+        updatedAt: item.updatedAt,
+      });
+    }
     this.repo.listItems.get(householdId).push(item);
     void this.clearPricingCacheForHousehold(householdId);
-    this.pushActivity(householdId, userId, 'list.item.added', `${userId} shtoi ${name}`);
+    await this.pushActivity(householdId, userId, 'list.item.added', `${userId} shtoi ${name}`);
     this.repo.recordDbTrace({ requestId: traceContext?.requestId, operation: 'insert', entity: 'list_items', householdId });
     return item;
   }
 
-  toggleItem({ userId, householdId, itemId, expectedVersion, traceContext = null }) {
-    this.assertMember(userId, householdId);
+  async toggleItem({ userId, householdId, itemId, expectedVersion, traceContext = null }) {
+    await this.assertMember(userId, householdId);
+    if (this.coreRepository) {
+      const updated = await this.coreRepository.toggleItem({ householdId, itemId, expectedVersion });
+      if (!updated) throw new Error('ITEM_NOT_FOUND');
+      if (updated.conflict) throw new Error('VERSION_CONFLICT');
+      const mirror = (this.repo.listItems.get(householdId) ?? []).find((entry) => entry.id === itemId);
+      if (mirror) {
+        mirror.purchased = updated.purchased;
+        mirror.version = Number(updated.version);
+        mirror.updatedAt = updated.updatedAt;
+      }
+      void this.clearPricingCacheForHousehold(householdId);
+      await this.pushActivity(householdId, userId, 'list.item.toggled', `${userId} ndryshoi ${updated.name}`);
+      this.repo.recordDbTrace({ requestId: traceContext?.requestId, operation: 'update', entity: 'list_items', householdId });
+      return updated;
+    }
     const item = this.mustFindItem(householdId, itemId);
     if (expectedVersion !== undefined && expectedVersion !== item.version) throw new Error('VERSION_CONFLICT');
     item.purchased = !item.purchased;
     item.version += 1;
     item.updatedAt = new Date().toISOString();
     void this.clearPricingCacheForHousehold(householdId);
-    this.pushActivity(householdId, userId, 'list.item.toggled', `${userId} ndryshoi ${item.name}`);
+    await this.pushActivity(householdId, userId, 'list.item.toggled', `${userId} ndryshoi ${item.name}`);
     this.repo.recordDbTrace({ requestId: traceContext?.requestId, operation: 'update', entity: 'list_items', householdId });
     return item;
   }
 
-  getActivity({ userId, householdId }) {
-    this.assertMember(userId, householdId);
+  async getActivity({ userId, householdId }) {
+    await this.assertMember(userId, householdId);
+    if (this.coreRepository?.listActivity) return this.coreRepository.listActivity({ householdId });
     return this.repo.activity.get(householdId) ?? [];
   }
 
-  getBudget({ userId, householdId }) {
-    this.assertMember(userId, householdId);
+  async getBudget({ userId, householdId }) {
+    await this.assertMember(userId, householdId);
+    if (this.coreRepository) return this.coreRepository.getBudget({ householdId });
     return this.repo.budgets.get(householdId);
   }
 
-  setBudgetLimit({ userId, householdId, limit, traceContext = null }) {
-    this.assertMember(userId, householdId);
+  async setBudgetLimit({ userId, householdId, limit, traceContext = null }) {
+    await this.assertMember(userId, householdId);
+    if (this.coreRepository) {
+      const budget = await this.coreRepository.setBudgetLimit({ householdId, limit });
+      await this.pushActivity(householdId, userId, 'budget.updated', `${userId} ndryshoi buxhetin në ${limit}`);
+      this.repo.recordDbTrace({ requestId: traceContext?.requestId, operation: 'update', entity: 'monthly_budgets', householdId });
+      return budget;
+    }
     const budget = this.repo.budgets.get(householdId);
     budget.limit = limit;
     budget.updatedAt = new Date().toISOString();
-    this.pushActivity(householdId, userId, 'budget.updated', `${userId} ndryshoi buxhetin në ${limit}`);
+    await this.pushActivity(householdId, userId, 'budget.updated', `${userId} ndryshoi buxhetin në ${limit}`);
     this.repo.recordDbTrace({ requestId: traceContext?.requestId, operation: 'update', entity: 'monthly_budgets', householdId });
     return budget;
   }
@@ -196,8 +264,8 @@ export class SmartCartStore {
     });
   }
 
-  addReceipt({ userId, householdId, store, items, traceContext = null }) {
-    this.assertMember(userId, householdId);
+  async addReceipt({ userId, householdId, store, items, traceContext = null }) {
+    await this.assertMember(userId, householdId);
     const normalizedItems = this.normalizeReceiptItems(items);
     const total = normalizedItems.reduce((sum, item) => sum + item.total, 0);
     const receipt = {
@@ -207,6 +275,34 @@ export class SmartCartStore {
       total: Number(total.toFixed(2)),
       createdAt: new Date().toISOString(),
     };
+    if (this.coreRepository) {
+      const currentBudget = await this.coreRepository.getBudget({ householdId });
+      const nextBudgetSpent = Number((Number(currentBudget?.spent ?? 0) + receipt.total).toFixed(2));
+      await this.coreRepository.addReceipt({
+        householdId,
+        receiptId: receipt.id,
+        store: receipt.store,
+        total: receipt.total,
+        createdAt: receipt.createdAt,
+        items: normalizedItems.map((item) => ({
+          id: randomUUID(),
+          name: item.name,
+          quantity: item.quantity,
+          unitPrice: item.unitPrice,
+          total: item.total,
+        })),
+        budgetSpent: nextBudgetSpent,
+      });
+      for (const item of normalizedItems) {
+        await this.coreRepository.addPantryItem({
+          id: randomUUID(),
+          householdId,
+          name: item.name,
+          quantity: item.quantity,
+          addedAt: new Date().toISOString(),
+        });
+      }
+    }
     this.repo.receipts.get(householdId).push(receipt);
 
     const budget = this.repo.budgets.get(householdId);
@@ -219,14 +315,14 @@ export class SmartCartStore {
       this.autoMarkPurchased(householdId, item.name);
     }
 
-    this.pushActivity(householdId, userId, 'receipt.added', `${userId} regjistroi faturë ${receipt.total}€`);
+    await this.pushActivity(householdId, userId, 'receipt.added', `${userId} regjistroi faturë ${receipt.total}€`);
     this.repo.recordDbTrace({ requestId: traceContext?.requestId, operation: 'insert', entity: 'receipts', householdId });
     return { receipt, budget };
   }
 
 
-  createReceiptUploadUrl({ userId, householdId, fileName, traceContext = null }) {
-    this.assertMember(userId, householdId);
+  async createReceiptUploadUrl({ userId, householdId, fileName, traceContext = null }) {
+    await this.assertMember(userId, householdId);
     const upload = {
       uploadId: randomUUID(),
       fileName,
@@ -236,13 +332,13 @@ export class SmartCartStore {
       createdAt: new Date().toISOString(),
     };
     this.repo.receiptUploads.get(householdId).push(upload);
-    this.pushActivity(householdId, userId, 'receipt.upload.created', `${userId} krijoi upload URL për faturë`);
+    await this.pushActivity(householdId, userId, 'receipt.upload.created', `${userId} krijoi upload URL për faturë`);
     this.repo.recordDbTrace({ requestId: traceContext?.requestId, operation: 'insert', entity: 'receipt_uploads', householdId });
     return upload;
   }
 
-  enqueueReceiptOcrJob({ userId, householdId, objectKey, apiRequestId = null, traceContext = null }) {
-    this.assertMember(userId, householdId);
+  async enqueueReceiptOcrJob({ userId, householdId, objectKey, apiRequestId = null, traceContext = null }) {
+    await this.assertMember(userId, householdId);
     const job = {
       jobId: randomUUID(),
       householdId,
@@ -263,7 +359,7 @@ export class SmartCartStore {
       },
     };
     this.repo.receiptOcrJobs.get(householdId).push(job);
-    this.pushActivity(householdId, userId, 'receipt.ocr.queued', `${userId} nisi OCR job`);
+    await this.pushActivity(householdId, userId, 'receipt.ocr.queued', `${userId} nisi OCR job`);
     this.repo.recordDbTrace({ requestId: traceContext?.requestId, operation: 'insert', entity: 'receipt_ocr_jobs', householdId });
 
     setTimeout(() => {
@@ -314,19 +410,16 @@ export class SmartCartStore {
     return job;
   }
 
-  retryReceiptOcrJob({ userId, householdId, jobId, traceContext = null }) {
-    this.assertMember(userId, householdId);
+  async retryReceiptOcrJob({ userId, householdId, jobId, traceContext = null }) {
+    await this.assertMember(userId, householdId);
     const jobs = this.repo.receiptOcrJobs.get(householdId) ?? [];
-  retryReceiptOcrJob({ userId, householdId, jobId }) {
-    this.assertMember(userId, householdId);
-    const jobs = this.receiptOcrJobs.get(householdId) ?? [];
     const job = jobs.find((entry) => entry.jobId === jobId);
     if (!job) throw new Error('OCR_JOB_NOT_FOUND');
     if (!['failed'].includes(job.status)) throw new Error('OCR_JOB_RETRY_NOT_ALLOWED');
 
     job.status = 'queued';
     job.updatedAt = new Date().toISOString();
-    this.pushActivity(householdId, userId, 'receipt.ocr.retried', `${userId} ritriggeroi OCR job`);
+    await this.pushActivity(householdId, userId, 'receipt.ocr.retried', `${userId} ritriggeroi OCR job`);
     this.repo.recordDbTrace({ requestId: traceContext?.requestId, operation: 'update', entity: 'receipt_ocr_jobs', householdId });
 
     setTimeout(() => {
@@ -336,13 +429,13 @@ export class SmartCartStore {
     return job;
   }
 
-  listReceiptOcrJobs({ userId, householdId }) {
-    this.assertMember(userId, householdId);
+  async listReceiptOcrJobs({ userId, householdId }) {
+    await this.assertMember(userId, householdId);
     return this.repo.receiptOcrJobs.get(householdId) ?? [];
   }
 
-  correctReceiptOcrJob({ userId, householdId, jobId, store, items, traceContext = null }) {
-    this.assertMember(userId, householdId);
+  async correctReceiptOcrJob({ userId, householdId, jobId, store, items, traceContext = null }) {
+    await this.assertMember(userId, householdId);
     const jobs = this.repo.receiptOcrJobs.get(householdId) ?? [];
     const job = jobs.find((entry) => entry.jobId === jobId);
     if (!job) throw new Error('OCR_JOB_NOT_FOUND');
@@ -361,14 +454,14 @@ export class SmartCartStore {
     };
     job.status = 'succeeded_corrected';
     job.updatedAt = new Date().toISOString();
-    this.pushActivity(householdId, userId, 'receipt.ocr.corrected', `${userId} korrigjoi manualisht OCR job`);
+    await this.pushActivity(householdId, userId, 'receipt.ocr.corrected', `${userId} korrigjoi manualisht OCR job`);
     this.repo.recordDbTrace({ requestId: traceContext?.requestId, operation: 'update', entity: 'receipt_ocr_jobs', householdId });
 
     return job;
   }
 
-  applyReceiptOcrJobResult({ userId, householdId, jobId, applyRequestId = null, traceContext = null }) {
-    this.assertMember(userId, householdId);
+  async applyReceiptOcrJobResult({ userId, householdId, jobId, applyRequestId = null, traceContext = null }) {
+    await this.assertMember(userId, householdId);
     const jobs = this.repo.receiptOcrJobs.get(householdId) ?? [];
     const job = jobs.find((entry) => entry.jobId === jobId);
     if (!job) throw new Error('OCR_JOB_NOT_FOUND');
@@ -376,7 +469,7 @@ export class SmartCartStore {
     const source = job.status === 'succeeded_corrected' ? job.correctedResult : job.result;
     if (!source) throw new Error('OCR_JOB_NOT_READY');
 
-    const result = this.addReceipt({
+    const result = await this.addReceipt({
       userId,
       householdId,
       store: source.store,
@@ -385,29 +478,140 @@ export class SmartCartStore {
     });
 
     job.trace.applyRequestId = applyRequestId;
-    this.pushActivity(householdId, userId, 'receipt.ocr.applied', `${userId} aplikoi OCR rezultatin`);
+    await this.pushActivity(householdId, userId, 'receipt.ocr.applied', `${userId} aplikoi OCR rezultatin`);
     this.repo.recordDbTrace({ requestId: traceContext?.requestId, operation: 'update', entity: 'receipt_ocr_jobs', householdId });
     return { job, appliedReceipt: result.receipt, budget: result.budget };
   }
 
-  listReceipts({ userId, householdId }) {
-    this.assertMember(userId, householdId);
+  async listReceipts({ userId, householdId }) {
+    await this.assertMember(userId, householdId);
+    if (this.coreRepository) return this.coreRepository.listReceipts({ householdId });
     return this.repo.receipts.get(householdId);
   }
 
-  getPantry({ userId, householdId }) {
-    this.assertMember(userId, householdId);
+  async getPantry({ userId, householdId }) {
+    await this.assertMember(userId, householdId);
+    if (this.coreRepository) return this.coreRepository.listPantry({ householdId });
     return this.repo.pantry.get(householdId);
   }
 
-  addPantryItem({ userId, householdId, name, quantity = 1, traceContext = null }) {
-    this.assertMember(userId, householdId);
+  async addPantryItem({ userId, householdId, name, quantity = 1, traceContext = null }) {
+    await this.assertMember(userId, householdId);
     const item = { id: randomUUID(), name, quantity, addedAt: new Date().toISOString() };
+    if (this.coreRepository) {
+      await this.coreRepository.addPantryItem({
+        id: item.id,
+        householdId,
+        name: item.name,
+        quantity: item.quantity,
+        addedAt: item.addedAt,
+      });
+    }
     this.repo.pantry.get(householdId).push(item);
     void this.clearRecipeCacheForHousehold(householdId);
-    this.pushActivity(householdId, userId, 'pantry.item.added', `${userId} shtoi pantry item ${name}`);
+    await this.pushActivity(householdId, userId, 'pantry.item.added', `${userId} shtoi pantry item ${name}`);
     this.repo.recordDbTrace({ requestId: traceContext?.requestId, operation: 'insert', entity: 'pantry_items', householdId });
     return item;
+  }
+
+  async parseVoiceItems({ userId, householdId, transcript, locale = 'ks', addToList = false, contractVersion = 'v1', traceContext = null }) {
+    await this.assertMember(userId, householdId);
+    if (contractVersion !== 'v1') throw new Error('VOICE_CONTRACT_UNSUPPORTED');
+    const segments = String(transcript)
+      .split(/[,.]| dhe /giu)
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+
+    const parsedItems = [];
+    const ambiguousSegments = [];
+    for (const segment of segments) {
+      const match = segment.match(/(?:(\d+(?:[.,]\d+)?)\s*(kg|g|l|ml|pcs?|cope|cop[eë]?|x)?\s*)?(.+)/iu);
+      if (!match) continue;
+      const quantity = match[1] ? Number(match[1].replace(',', '.')) : 1;
+      const unit = this.normalizeVoiceUnit(match[2]);
+      const name = match[3].trim();
+      if (!name) continue;
+      const confidence = this.computeVoiceConfidence({ rawSegment: segment, quantity, unit, name });
+      if (confidence < 0.65) {
+        ambiguousSegments.push({ rawSegment: segment, reason: 'LOW_CONFIDENCE', confidence });
+      }
+      parsedItems.push({
+        name: name.charAt(0).toUpperCase() + name.slice(1),
+        quantity: Number.isFinite(quantity) && quantity > 0 ? Math.min(quantity, 999) : 1,
+        unit,
+        confidence,
+        category: this.resolveCategory(name),
+      });
+    }
+    const normalizedParsedItems = this.consolidateVoiceItems(parsedItems).slice(0, 50);
+
+    const createdItems = [];
+    if (addToList) {
+      for (const item of normalizedParsedItems) {
+        createdItems.push(
+          await this.addItem({
+            userId,
+            householdId,
+            name: item.name,
+            quantity: item.quantity,
+            traceContext,
+          }),
+        );
+      }
+    }
+
+    await this.pushActivity(householdId, userId, 'input.voice.parsed', `${userId} përdori voice input (${locale})`);
+    this.repo.recordDbTrace({ requestId: traceContext?.requestId, operation: 'insert', entity: 'voice_inputs', householdId });
+    return {
+      contractVersion,
+      inputSource: 'voice',
+      locale: String(locale).toLowerCase(),
+      transcript,
+      parsedItems: normalizedParsedItems,
+      ambiguousSegments,
+      addedCount: createdItems.length,
+      addedItems: createdItems,
+    };
+  }
+
+  async lookupBarcode({ userId, householdId, barcode, locale = 'ks', quantity = 1, addToList = false, traceContext = null }) {
+    await this.assertMember(userId, householdId);
+    const localeKey = String(locale).toLowerCase();
+    const localizedCatalog = BARCODE_CATALOG[localeKey] ?? BARCODE_CATALOG.ks;
+    const barcodeKey = String(barcode);
+    let product = localizedCatalog[barcodeKey];
+    let resolutionSource = 'catalog_exact';
+    if (!product) {
+      const prefix = barcodeKey.slice(0, 7);
+      product = BARCODE_PREFIX_FALLBACK[prefix] ?? null;
+      resolutionSource = product ? 'catalog_prefix_fallback' : 'not_found';
+    }
+    if (!product) throw new Error('BARCODE_NOT_FOUND');
+
+    let listItem = null;
+    if (addToList) {
+      listItem = await this.addItem({
+        userId,
+        householdId,
+        name: product.name,
+        quantity,
+        traceContext,
+      });
+    }
+
+    await this.pushActivity(householdId, userId, 'input.barcode.resolved', `${userId} skanoi barcode ${barcode}`);
+    this.repo.recordDbTrace({ requestId: traceContext?.requestId, operation: 'select', entity: 'barcode_catalog', householdId });
+    return {
+      barcode: barcodeKey,
+      inputSource: 'barcode',
+      locale: localeKey,
+      product,
+      quantity,
+      confidence: product.confidence ?? (resolutionSource === 'catalog_exact' ? 0.99 : 0.55),
+      resolutionSource,
+      addedToList: Boolean(addToList),
+      listItem,
+    };
   }
 
   ingestStagingPrices({ actorId, rows, traceContext = null }) {
@@ -470,7 +674,7 @@ export class SmartCartStore {
   }
 
   async estimatePrices({ userId, householdId, refresh = false }) {
-    this.assertMember(userId, householdId);
+    await this.assertMember(userId, householdId);
     const activeItems = (this.repo.listItems.get(householdId) ?? []).filter((item) => !item.purchased);
     const signature = activeItems
       .map((item) => `${this.canonicalizeItemKey(item.name)}:${item.quantity}:${item.version}`)
@@ -531,14 +735,14 @@ export class SmartCartStore {
     };
   }
 
-  listFlyers({ userId, householdId }) {
-    this.assertMember(userId, householdId);
+  async listFlyers({ userId, householdId }) {
+    await this.assertMember(userId, householdId);
     const items = this.repo.listItems.get(householdId).map((item) => this.normalizeName(item.name));
     return this.flyers.filter((flyer) => items.some((item) => item.includes(flyer.keyword)));
   }
 
   async suggestRecipes({ userId, householdId, refresh = false }) {
-    this.assertMember(userId, householdId);
+    await this.assertMember(userId, householdId);
     this.checkRecipeLimit(userId);
     const pantry = this.repo.pantry.get(householdId);
     const pantrySignature = pantry
@@ -600,7 +804,7 @@ export class SmartCartStore {
     });
     if (this.cache) await this.cache.setJson(`recipes:${cacheKey}`, payload, RECIPE_CACHE_TTL_MS / 1000);
 
-    this.pushActivity(householdId, userId, 'recipes.generated', `${userId} kërkoi receta AI`);
+    await this.pushActivity(householdId, userId, 'recipes.generated', `${userId} kërkoi receta AI`);
     return {
       ...payload,
       cached: false,
@@ -609,8 +813,8 @@ export class SmartCartStore {
     };
   }
 
-  addRecipeIngredientsToList({ userId, householdId, recipeKey, traceContext = null }) {
-    this.assertMember(userId, householdId);
+  async addRecipeIngredientsToList({ userId, householdId, recipeKey, traceContext = null }) {
+    await this.assertMember(userId, householdId);
     const template = RECIPE_TEMPLATES[recipeKey];
     if (!template) throw new Error('RECIPE_NOT_FOUND');
 
@@ -622,12 +826,12 @@ export class SmartCartStore {
       const pantryHas = pantry.some((entry) => this.canonicalizeItemKey(entry.name) === this.canonicalizeItemKey(ingredient.name));
       const listHas = items.some((entry) => this.canonicalizeItemKey(entry.name) === this.canonicalizeItemKey(ingredient.name) && !entry.purchased);
       if (!pantryHas && !listHas) {
-        const item = this.addItem({ userId, householdId, name: ingredient.name, quantity: ingredient.quantity });
+        const item = await this.addItem({ userId, householdId, name: ingredient.name, quantity: ingredient.quantity });
         added.push(item);
       }
     }
 
-    this.pushActivity(householdId, userId, 'recipes.added_to_list', `${userId} shtoi përbërësit e recetës ${template.name}`);
+    await this.pushActivity(householdId, userId, 'recipes.added_to_list', `${userId} shtoi përbërësit e recetës ${template.name}`);
     this.repo.recordDbTrace({ requestId: traceContext?.requestId, operation: 'insert', entity: 'list_items', householdId });
     return { recipe: template.name, addedItems: added };
   }
@@ -655,12 +859,17 @@ export class SmartCartStore {
     return () => this.events.off(topic, listener);
   }
 
-  assertMember(userId, householdId) {
+  async assertMember(userId, householdId) {
+    if (this.coreRepository?.assertMember) {
+      const allowed = await this.coreRepository.assertMember({ householdId, userId });
+      if (!allowed) throw new Error('FORBIDDEN_HOUSEHOLD_ACCESS');
+      return;
+    }
     this.ensureUser(userId);
     if (!this.repo.memberships.get(userId).has(householdId)) throw new Error('FORBIDDEN_HOUSEHOLD_ACCESS');
   }
 
-  pushActivity(householdId, actorId, type, message) {
+  async pushActivity(householdId, actorId, type, message) {
     const event = {
       id: randomUUID(),
       actorId,
@@ -669,6 +878,9 @@ export class SmartCartStore {
       createdAt: new Date().toISOString(),
       householdId,
     };
+    if (this.coreRepository?.addActivity) {
+      await this.coreRepository.addActivity(event);
+    }
     this.repo.activity.get(householdId).push(event);
     this.events.emit(`household:${householdId}`, event);
   }
@@ -716,6 +928,42 @@ export class SmartCartStore {
     if (base.includes('oriz')) return 'oriz';
 
     return base;
+  }
+
+  normalizeVoiceUnit(value) {
+    const raw = String(value ?? '').toLowerCase().trim();
+    if (!raw || raw === 'x' || raw === 'cope' || raw === 'copë' || raw === 'cop') return 'pcs';
+    if (raw === 'g') return 'g';
+    if (raw === 'kg') return 'kg';
+    if (raw === 'ml') return 'ml';
+    if (raw === 'l') return 'l';
+    if (raw === 'pc' || raw === 'pcs') return 'pcs';
+    return 'pcs';
+  }
+
+  computeVoiceConfidence({ rawSegment, quantity, unit, name }) {
+    let score = 0.9;
+    if (!rawSegment || String(rawSegment).length < 2) score -= 0.15;
+    if (!Number.isFinite(quantity) || quantity <= 0) score -= 0.2;
+    if (!name || name.length < 2) score -= 0.2;
+    if (!unit) score -= 0.1;
+    if (/[\d]{5,}/.test(name)) score -= 0.15;
+    return Math.max(0.3, Number(score.toFixed(2)));
+  }
+
+  consolidateVoiceItems(items) {
+    const grouped = new Map();
+    for (const item of items) {
+      const key = `${this.canonicalizeItemKey(item.name)}:${item.unit}`;
+      const current = grouped.get(key);
+      if (!current) {
+        grouped.set(key, { ...item });
+        continue;
+      }
+      current.quantity = Number((current.quantity + item.quantity).toFixed(2));
+      current.confidence = Number(Math.max(current.confidence, item.confidence).toFixed(2));
+    }
+    return Array.from(grouped.values());
   }
 
   computeMatchConfidence(original, canonical) {

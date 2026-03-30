@@ -91,3 +91,21 @@ export function toggleItemSchema(body) {
   assertObject(body);
   if (body.expectedVersion !== undefined && (!Number.isInteger(body.expectedVersion) || body.expectedVersion <= 0)) throw new Error('VALIDATION_PAYLOAD');
 }
+
+export function voiceParseSchema(body) {
+  assertObject(body);
+  if (!assertNonEmptyString(body.transcript)) throw new Error('VALIDATION_PAYLOAD');
+  if (body.transcript.length > 500) throw new Error('VALIDATION_PAYLOAD');
+  if (body.locale !== undefined && !assertNonEmptyString(body.locale)) throw new Error('VALIDATION_PAYLOAD');
+  if (body.addToList !== undefined && typeof body.addToList !== 'boolean') throw new Error('VALIDATION_PAYLOAD');
+  if (body.contractVersion !== undefined && body.contractVersion !== 'v1') throw new Error('VALIDATION_PAYLOAD');
+}
+
+export function barcodeLookupSchema(body) {
+  assertObject(body);
+  if (!assertNonEmptyString(body.barcode)) throw new Error('VALIDATION_PAYLOAD');
+  if (!/^\d{8,14}$/.test(body.barcode.trim())) throw new Error('VALIDATION_PAYLOAD');
+  if (body.locale !== undefined && !assertNonEmptyString(body.locale)) throw new Error('VALIDATION_PAYLOAD');
+  if (body.quantity !== undefined && !assertPositiveNumber(body.quantity)) throw new Error('VALIDATION_PAYLOAD');
+  if (body.addToList !== undefined && typeof body.addToList !== 'boolean') throw new Error('VALIDATION_PAYLOAD');
+}

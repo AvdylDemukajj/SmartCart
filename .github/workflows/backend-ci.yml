@@ -13,6 +13,22 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: smartcart
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d smartcart"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/smartcart
     defaults:
       run:
         working-directory: backend
@@ -24,4 +40,7 @@ jobs:
           cache: 'npm'
           cache-dependency-path: backend/package.json
       - run: npm install
+      - run: npm run typecheck:v2
       - run: npm test
+      - run: npm test -- --test-name-pattern "voice parse|barcode lookup|smart input endpoints enforce dedicated rate limit"
+      - run: node ../scripts/verify-go-live.mjs

@@ -23,6 +23,7 @@ create table if not exists list_items (
   quantity numeric not null default 1,
   category text not null,
   purchased boolean not null default false,
+  version int not null default 1,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );

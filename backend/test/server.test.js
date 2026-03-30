@@ -76,6 +76,52 @@ test('supports bearer jwt auth with valid signature', async () => {
   });
 });
 
+test('enforces jwt issuer and audience when configured', async () => {
+  const previousSecret = process.env.AUTH_JWT_SECRET;
+  const previousIssuer = process.env.AUTH_JWT_ISSUER;
+  const previousAudience = process.env.AUTH_JWT_AUDIENCE;
+  process.env.AUTH_JWT_SECRET = 'strict-secret';
+  process.env.AUTH_JWT_ISSUER = 'smartcart-auth';
+  process.env.AUTH_JWT_AUDIENCE = 'smartcart-api';
+
+  try {
+    await withServer(async (baseUrl) => {
+      const validJwt = createTestJwt({
+        sub: 'jwt-strict-user',
+        secret: 'strict-secret',
+        iss: 'smartcart-auth',
+        aud: 'smartcart-api',
+      });
+      const validRes = await fetch(`${baseUrl}/households`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${validJwt}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'Strict JWT Household' }),
+      });
+      assert.equal(validRes.status, 201);
+
+      const badAudJwt = createTestJwt({
+        sub: 'jwt-strict-user',
+        secret: 'strict-secret',
+        iss: 'smartcart-auth',
+        aud: 'wrong-audience',
+      });
+      const badAudRes = await fetch(`${baseUrl}/households`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${badAudJwt}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'Bad aud' }),
+      });
+      assert.equal(badAudRes.status, 401);
+    });
+  } finally {
+    if (previousSecret === undefined) delete process.env.AUTH_JWT_SECRET;
+    else process.env.AUTH_JWT_SECRET = previousSecret;
+    if (previousIssuer === undefined) delete process.env.AUTH_JWT_ISSUER;
+    else process.env.AUTH_JWT_ISSUER = previousIssuer;
+    if (previousAudience === undefined) delete process.env.AUTH_JWT_AUDIENCE;
+    else process.env.AUTH_JWT_AUDIENCE = previousAudience;
+  }
+});
+
 test('rejects invalid jwt token', async () => {
   await withServer(async (baseUrl) => {
     const res = await fetch(`${baseUrl}/households`, {
@@ -507,6 +553,172 @@ test('recipe suggest cache + add-to-list expansion works', async () => {
     const cache = await cacheRes.json();
     assert.equal(cache.activeEntries >= 1, true);
   });
+});
+
+test('voice parse endpoint returns normalized items and can add to list', async () => {
+  await withServer(async (baseUrl) => {
+    const household = await createHousehold(baseUrl);
+
+    const parseRes = await fetch(`${baseUrl}/households/${household.id}/voice/parse`, {
+      method: 'POST',
+      headers: { 'x-user-id': 'ana', 'content-type': 'application/json' },
+      body: JSON.stringify({
+        transcript: '2 qumesht dhe 1 buke',
+        locale: 'ks',
+        addToList: true,
+        contractVersion: 'v1',
+      }),
+    });
+    assert.equal(parseRes.status, 200);
+    const parsed = await parseRes.json();
+    assert.equal(parsed.contractVersion, 'v1');
+    assert.equal(parsed.inputSource, 'voice');
+    assert.equal(parsed.parsedItems.length, 2);
+    assert.equal(typeof parsed.parsedItems[0].confidence, 'number');
+    assert.equal(parsed.parsedItems[0].unit, 'pcs');
+    assert.equal(Array.isArray(parsed.ambiguousSegments), true);
+    assert.equal(parsed.addedCount, 2);
+
+    const itemsRes = await fetch(`${baseUrl}/households/${household.id}/items`, {
+      headers: { 'x-user-id': 'ana' },
+    });
+    const items = await itemsRes.json();
+    assert.equal(items.some((entry) => entry.name.toLowerCase().includes('qumesht')), true);
+    assert.equal(items.some((entry) => entry.name.toLowerCase().includes('buke')), true);
+  });
+});
+
+test('barcode lookup resolves locale product and supports add-to-list', async () => {
+  await withServer(async (baseUrl) => {
+    const household = await createHousehold(baseUrl);
+
+    const lookupRes = await fetch(`${baseUrl}/households/${household.id}/barcodes/lookup`, {
+      method: 'POST',
+      headers: { 'x-user-id': 'ana', 'content-type': 'application/json' },
+      body: JSON.stringify({
+        barcode: '3901234500011',
+        locale: 'al',
+        quantity: 2,
+        addToList: true,
+      }),
+    });
+    assert.equal(lookupRes.status, 200);
+    const lookup = await lookupRes.json();
+    assert.equal(lookup.product.name, 'Qumësht');
+    assert.equal(lookup.inputSource, 'barcode');
+    assert.equal(lookup.resolutionSource, 'catalog_exact');
+    assert.equal(lookup.confidence > 0.9, true);
+    assert.equal(lookup.addedToList, true);
+    assert.equal(lookup.listItem.quantity, 2);
+
+    const fallbackRes = await fetch(`${baseUrl}/households/${household.id}/barcodes/lookup`, {
+      method: 'POST',
+      headers: { 'x-user-id': 'ana', 'content-type': 'application/json' },
+      body: JSON.stringify({
+        barcode: '3901234999999',
+      }),
+    });
+    assert.equal(fallbackRes.status, 200);
+    const fallback = await fallbackRes.json();
+    assert.equal(fallback.resolutionSource, 'catalog_prefix_fallback');
+    assert.equal(fallback.confidence <= 0.6, true);
+
+    const notFoundRes = await fetch(`${baseUrl}/households/${household.id}/barcodes/lookup`, {
+      method: 'POST',
+      headers: { 'x-user-id': 'ana', 'content-type': 'application/json' },
+      body: JSON.stringify({
+        barcode: '0000000000000',
+      }),
+    });
+    assert.equal(notFoundRes.status, 404);
+  });
+});
+
+test('smart input endpoints enforce dedicated rate limit', async () => {
+  await withServer(async (baseUrl) => {
+    const household = await createHousehold(baseUrl);
+    const headers = { 'x-user-id': 'ana', 'content-type': 'application/json' };
+
+    const firstRes = await fetch(`${baseUrl}/households/${household.id}/voice/parse`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ transcript: '1 qumesht' }),
+    });
+    assert.equal(firstRes.status, 200);
+
+    const secondRes = await fetch(`${baseUrl}/households/${household.id}/barcodes/lookup`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ barcode: '3901234500011' }),
+    });
+    assert.equal(secondRes.status, 429);
+    const payload = await secondRes.json();
+    assert.equal(payload.error, 'Smart input rate limit exceeded');
+  }, { smartInputRateLimit: 1, smartInputRateWindowMs: 60_000 });
+});
+
+test('voice parse rejects unsupported contract version', async () => {
+  await withServer(async (baseUrl) => {
+    const household = await createHousehold(baseUrl);
+    const res = await fetch(`${baseUrl}/households/${household.id}/voice/parse`, {
+      method: 'POST',
+      headers: { 'x-user-id': 'ana', 'content-type': 'application/json' },
+      body: JSON.stringify({
+        transcript: '2 qumesht',
+        contractVersion: 'v2',
+      }),
+    });
+    assert.equal(res.status, 400);
+  });
+});
+
+test('createApp requires persistent store when requirePersistentStore=true', () => {
+  assert.throws(
+    () => createApp({ requirePersistentStore: true }),
+    /PERSISTENT_STORE_REQUIRED/,
+  );
+});
+
+test('production mode disables x-user-id and dev-user auth methods', async () => {
+  const previousNodeEnv = process.env.NODE_ENV;
+  const previousAllow = process.env.ALLOW_INSECURE_DEV_AUTH;
+  const previousSecret = process.env.AUTH_JWT_SECRET;
+  process.env.NODE_ENV = 'production';
+  process.env.ALLOW_INSECURE_DEV_AUTH = 'false';
+  process.env.AUTH_JWT_SECRET = 'prod-secret';
+
+  try {
+    await withServer(async (baseUrl) => {
+      const headerAuthRes = await fetch(`${baseUrl}/households`, {
+        method: 'POST',
+        headers: { 'x-user-id': 'ana', 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'Prod Household Header' }),
+      });
+      assert.equal(headerAuthRes.status, 401);
+
+      const devUserRes = await fetch(`${baseUrl}/households`, {
+        method: 'POST',
+        headers: { authorization: 'Bearer dev-user:ana', 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'Prod Household DevUser' }),
+      });
+      assert.equal(devUserRes.status, 401);
+
+      const jwt = createTestJwt({ sub: 'ana', secret: 'prod-secret' });
+      const jwtRes = await fetch(`${baseUrl}/households`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${jwt}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'Prod Household JWT' }),
+      });
+      assert.equal(jwtRes.status, 201);
+    }, { requirePersistentStore: false });
+  } finally {
+    if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = previousNodeEnv;
+    if (previousAllow === undefined) delete process.env.ALLOW_INSECURE_DEV_AUTH;
+    else process.env.ALLOW_INSECURE_DEV_AUTH = previousAllow;
+    if (previousSecret === undefined) delete process.env.AUTH_JWT_SECRET;
+    else process.env.AUTH_JWT_SECRET = previousSecret;
+  }
 });
 
 
