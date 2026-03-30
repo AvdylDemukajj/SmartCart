@@ -1,0 +1,23 @@
+release:
+  name: "SmartCart Sprint 8 Go-Live"
+  date: "2026-03-30"
+  environment: "production"
+  decision: "approved"
+  rollout_strategy:
+    mode: "phased"
+    canary_percent: 10
+    canary_duration_minutes: 30
+    full_rollout_after_minutes: 120
+  hypercare:
+    duration_days: 14
+    on_call_rotation: "enabled"
+  signoff:
+    architecture: "approved"
+    security: "approved"
+    qa_test: "approved"
+    ops_devops: "approved"
+  required_artifacts:
+    - "docs/release/production-readiness-checklist.md"
+    - "docs/ops/incident-runbook.md"
+    - "docs/ops/alerting-rules.md"
+    - "docs/release/staging-smoke-tests.md"

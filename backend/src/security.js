@@ -11,7 +11,11 @@ function encodeBase64Url(buffer) {
 }
 
 function getJwtSecrets() {
-  const value = process.env.AUTH_JWT_SECRETS ?? process.env.AUTH_JWT_SECRET ?? 'dev-secret';
+  const value = process.env.AUTH_JWT_SECRETS ?? process.env.AUTH_JWT_SECRET;
+  if (!value) {
+    if (process.env.NODE_ENV === 'production') throw new Error('AUTH_SECRET_MISSING');
+    return ['dev-secret'];
+  }
   return value.split(',').map((entry) => entry.trim()).filter(Boolean);
 }
 
@@ -43,6 +47,14 @@ function verifyJwt(token) {
   if (!isValid) throw new Error('AUTH_INVALID_TOKEN');
 
   if (typeof payload.exp === 'number' && payload.exp * 1000 <= Date.now()) throw new Error('AUTH_EXPIRED_TOKEN');
+  const requiredIssuer = process.env.AUTH_JWT_ISSUER;
+  if (requiredIssuer && payload.iss !== requiredIssuer) throw new Error('AUTH_INVALID_TOKEN');
+  const requiredAudience = process.env.AUTH_JWT_AUDIENCE;
+  if (requiredAudience) {
+    const aud = payload.aud;
+    const match = Array.isArray(aud) ? aud.includes(requiredAudience) : aud === requiredAudience;
+    if (!match) throw new Error('AUTH_INVALID_TOKEN');
+  }
   const userId = payload.sub ?? payload.userId;
   if (typeof userId !== 'string' || !userId.trim()) throw new Error('AUTH_INVALID_TOKEN');
 
@@ -50,14 +62,22 @@ function verifyJwt(token) {
 }
 
 export function resolveUserId(req) {
+  const allowInsecureDevAuth = process.env.ALLOW_INSECURE_DEV_AUTH === 'true'
+    || !process.env.NODE_ENV
+    || process.env.NODE_ENV === 'development'
+    || process.env.NODE_ENV === 'test';
   const headerUser = req.headers['x-user-id'];
-  if (typeof headerUser === 'string' && headerUser.trim()) return headerUser.trim();
+  if (typeof headerUser === 'string' && headerUser.trim()) {
+    if (!allowInsecureDevAuth) throw new Error('AUTH_INSECURE_METHOD_DISABLED');
+    return headerUser.trim();
+  }
 
   const authorization = req.headers.authorization;
   if (typeof authorization !== 'string' || !authorization.startsWith('Bearer ')) return null;
   const token = authorization.slice('Bearer '.length).trim();
 
   if (token.startsWith('dev-user:')) {
+    if (!allowInsecureDevAuth) throw new Error('AUTH_INSECURE_METHOD_DISABLED');
     const userId = token.replace('dev-user:', '').trim();
     if (!userId) throw new Error('AUTH_INVALID_TOKEN');
     return userId;
@@ -66,9 +86,14 @@ export function resolveUserId(req) {
   return verifyJwt(token);
 }
 
-export function createTestJwt({ sub, secret = 'dev-secret', expiresInSec = 3600 }) {
+export function createTestJwt({ sub, secret = 'dev-secret', expiresInSec = 3600, iss, aud }) {
   const header = encodeBase64Url(Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })));
-  const payload = encodeBase64Url(Buffer.from(JSON.stringify({ sub, exp: Math.floor(Date.now() / 1000) + expiresInSec })));
+  const payload = encodeBase64Url(Buffer.from(JSON.stringify({
+    sub,
+    exp: Math.floor(Date.now() / 1000) + expiresInSec,
+    ...(iss ? { iss } : {}),
+    ...(aud ? { aud } : {}),
+  })));
   const signature = encodeBase64Url(createHmac('sha256', secret).update(`${header}.${payload}`).digest());
   return `${header}.${payload}.${signature}`;
 }

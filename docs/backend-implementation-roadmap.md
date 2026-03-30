@@ -73,6 +73,12 @@ Ky roadmap e ndan backend-in në hapa të menaxhueshëm që të ndërtohet gradu
 - [~] Staging deployment + smoke tests (në progres: `scripts/smoke-staging.sh` + playbook).
 - [x] Production readiness checklist.
 
+## Phase 10 — TypeScript Enterprise Transition
+- [x] V2 typed backend skeleton (`src-v2`) me architecture layering (`config/core/application/modules`).
+- [x] Type-safe configuration loading + validation.
+- [x] Router abstraction me request context dhe auth-aware route contracts.
+- [x] Build scripts (`start:v2`, `typecheck:v2`) për gradual migration strategy.
+
 ## Current sprint (implemented now)
 - [x] Real-time SSE stream endpoint për household activity.
 - [x] Event emitter layer në store.
@@ -88,3 +94,5 @@ Ky roadmap e ndan backend-in në hapa të menaxhueshëm që të ndërtohet gradu
 - [x] OCR retry/dead-letter + manual correction flow.
 - [x] Recipe cache + recipe-to-list expansion API.
 - [x] Phase 6 scaffold: Drizzle schema + initial migration + pricing repository split.
+
+Reference delivery plan: `docs/planning/sprint-plan.md`.

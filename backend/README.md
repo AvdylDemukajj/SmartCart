@@ -57,8 +57,14 @@ Aktualisht mbështetet:
 - `Authorization: Bearer dev-user:<id>` (dev mode)
 - `Authorization: Bearer <jwt>` (HS256; `sub` claim)
 
+Shënim production:
+- Në `NODE_ENV=production`, `x-user-id` dhe `dev-user:*` bllokohen automatikisht.
+- Përjashtim vetëm me `ALLOW_INSECURE_DEV_AUTH=true` (jo e rekomanduar).
+
 Secrets për JWT verification/rotation:
 - `AUTH_JWT_SECRET` ose `AUTH_JWT_SECRETS=oldSecret,newSecret`
+- `AUTH_JWT_ISSUER` (opsionale, por e rekomanduar në production)
+- `AUTH_JWT_AUDIENCE` (opsionale, por e rekomanduar në production)
 - `SECURITY_AUDIT_ADMIN_USER_ID` (default `admin`)
 - `SECURITY_AUDIT_ADMIN_KEY` (opsionale për akses me `x-admin-key`)
 - `REDIS_URL` (opsionale për real cache backend)
@@ -112,9 +118,20 @@ Secrets për JWT verification/rotation:
 - `POST /households/:householdId/recipes/:recipeKey/add-to-list`
 - `GET /recipes/cache`
 
+### Smart Inputs contract notes
+- `POST /households/:householdId/voice/parse` mbështet `contractVersion` (aktualisht `v1`).
+- Voice response kthen `parsedItems[]` me `name`, `quantity`, `unit`, `confidence` + `ambiguousSegments`.
+- Barcode response kthen `resolutionSource` (`catalog_exact` ose `catalog_prefix_fallback`) dhe `confidence`.
+- Smart input endpoints kanë rate-limit të dedikuar (default: 20 kërkesa/min për user).
+
 ## Persistence
-Implementimi aktual përdor in-memory store për zhvillim të shpejtë.
-Skema SQL në `db/schema.sql` është baza për migrim në Postgres + Drizzle + RLS.
+Runtime përdor automatikisht Postgres repository kur `DATABASE_URL` është i konfiguruar.
+Në mungesë të `DATABASE_URL`, backend vazhdon me fallback in-memory për zhvillim lokal.
+Skema SQL në `db/schema.sql` + migrimet në `db/migrations` mbulojnë bazën për Postgres + RLS.
+
+Production policy:
+- Në `NODE_ENV=production`, aplikacioni kërkon persistence real (Postgres).
+- Për të lejuar fallback emergjent in-memory në production, vendos `ALLOW_INMEMORY_FALLBACK=1` (jo e rekomanduar).
 
 
 ## Data Layer Scaffold
@@ -137,3 +154,39 @@ Additional docs:
 Load test starters:
 - `load/k6-smoke.js`
 - `load/artillery-smoke.yml`
+
+Release governance verification:
+- `node ../scripts/verify-go-live.mjs`
+
+## TypeScript V2 Architecture (Senior-grade foundation)
+Për të adresuar shkallëzimin dhe maintainability në nivel senior, është shtuar një bazë e re `src-v2/` me Node.js + TypeScript dhe ndarje modulare:
+
+- `config/` — typed env/config validation
+- `core/http/` — router abstraction + request context
+- `application/` — route registration/orchestration
+- `modules/` — module services (health, households)
+
+Run V2 server:
+
+```bash
+cd backend
+npm run start:v2
+```
+
+Type check V2:
+
+```bash
+cd backend
+npm run typecheck:v2
+```
+
+Sprint 1 core-platform hardening in V2 includes:
+- standardized request logging with request-id + duration
+- centralized HTTP error mapping
+- auth method tracking (`x-user-id`, `bearer-dev-user`, `bearer-jwt`)
+- environment policy to disable insecure dev auth outside development
+
+Optional env for V2 security policy:
+- `ALLOW_INSECURE_DEV_AUTH=false` (recommended for staging/production)
+
+Ky është një hap tranzicioni drejt një arkitekture enterprise-ready pa prishur runtime-in ekzistues.

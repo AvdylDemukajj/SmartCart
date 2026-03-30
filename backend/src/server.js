@@ -6,7 +6,22 @@ import { SmartCartStore } from './store.js';
 import { FixedWindowRateLimiter, resolveUserId } from './security.js';
 import { InMemoryTelemetry } from './telemetry.js';
 import { createCacheFromEnv } from './cache.js';
-import { addItemSchema, addMemberSchema, addPantrySchema, addReceiptSchema, correctOcrSchema, createHouseholdSchema, enqueueOcrSchema, parseBody, pricingStagingSchema, setBudgetSchema, toggleItemSchema, uploadUrlSchema } from './validation.js';
+import {
+  addItemSchema,
+  addMemberSchema,
+  addPantrySchema,
+  addReceiptSchema,
+  barcodeLookupSchema,
+  correctOcrSchema,
+  createHouseholdSchema,
+  enqueueOcrSchema,
+  parseBody,
+  pricingStagingSchema,
+  setBudgetSchema,
+  toggleItemSchema,
+  uploadUrlSchema,
+  voiceParseSchema,
+} from './validation.js';
 
 function readBody(req) {
   return new Promise((resolve, reject) => {
@@ -111,7 +126,11 @@ function logRequest({ requestId, method, path, userId, status, error }) {
 }
 
 export function createApp(config = {}) {
-  const store = new SmartCartStore({ cache: config.cache ?? null });
+  const coreRepository = config.coreRepository ?? null;
+  const persistentStoreRequired = config.requirePersistentStore
+    ?? (process.env.NODE_ENV === 'production' && process.env.ALLOW_INMEMORY_FALLBACK !== '1');
+  if (persistentStoreRequired && !coreRepository) throw new Error('PERSISTENT_STORE_REQUIRED');
+  const store = new SmartCartStore({ cache: config.cache ?? null, coreRepository });
   const globalLimiter = new FixedWindowRateLimiter({
     limit: config.globalRateLimit ?? 120,
     windowMs: config.globalRateWindowMs ?? 60_000,
@@ -119,6 +138,10 @@ export function createApp(config = {}) {
   const aiLimiter = new FixedWindowRateLimiter({
     limit: config.aiRateLimit ?? 10,
     windowMs: config.aiRateWindowMs ?? 60_000,
+  });
+  const smartInputLimiter = new FixedWindowRateLimiter({
+    limit: config.smartInputRateLimit ?? 20,
+    windowMs: config.smartInputRateWindowMs ?? 60_000,
   });
   const telemetry = new InMemoryTelemetry();
 
@@ -173,16 +196,20 @@ export function createApp(config = {}) {
         const aiRate = aiLimiter.take(userId);
         if (!aiRate.allowed) throw new Error('RATE_LIMIT_AI');
       }
+      if (method === 'POST' && (/^\/households\/[^/]+\/voice\/parse$/.test(url.pathname) || /^\/households\/[^/]+\/barcodes\/lookup$/.test(url.pathname))) {
+        const smartInputRate = smartInputLimiter.take(userId);
+        if (!smartInputRate.allowed) throw new Error('RATE_LIMIT_SMART_INPUT');
+      }
 
       if (url.pathname === '/households' && method === 'POST') {
         const body = parseBody(createHouseholdSchema, await readBody(req));
-        const payload = store.createHousehold({ ownerId: userId, name: body.name, traceContext: { requestId } });
+        const payload = await store.createHousehold({ ownerId: userId, name: body.name, traceContext: { requestId } });
         logRequest({ requestId, method, path: url.pathname, userId, status: 201 });
         return sendJson(res, 201, payload, requestId);
       }
 
       if (url.pathname === '/households' && method === 'GET') {
-        const payload = store.listHouseholdsForUser(userId);
+        const payload = await store.listHouseholdsForUser(userId);
         logRequest({ requestId, method, path: url.pathname, userId, status: 200 });
         return sendJson(res, 200, payload, requestId);
       }
@@ -190,7 +217,7 @@ export function createApp(config = {}) {
       if (method === 'POST' && /^\/households\/[^/]+\/members$/.test(url.pathname)) {
         const householdId = url.pathname.split('/')[2];
         const body = parseBody(addMemberSchema, await readBody(req));
-        const payload = store.addMember({ actorId: userId, householdId, memberId: body.memberId, traceContext: { requestId } });
+        const payload = await store.addMember({ actorId: userId, householdId, memberId: body.memberId, traceContext: { requestId } });
         logRequest({ requestId, method, path: url.pathname, userId, status: 201 });
         return sendJson(res, 201, payload, requestId);
       }
@@ -204,7 +231,7 @@ export function createApp(config = {}) {
 
       if (method === 'GET' && /^\/households\/[^/]+\/items$/.test(url.pathname)) {
         const householdId = url.pathname.split('/')[2];
-        const payload = store.getItems({ userId, householdId });
+        const payload = await store.getItems({ userId, householdId });
         logRequest({ requestId, method, path: url.pathname, userId, status: 200 });
         return sendJson(res, 200, payload, requestId);
       }
@@ -212,7 +239,7 @@ export function createApp(config = {}) {
       if (method === 'POST' && /^\/households\/[^/]+\/items$/.test(url.pathname)) {
         const householdId = url.pathname.split('/')[2];
         const body = parseBody(addItemSchema, await readBody(req));
-        const payload = store.addItem({ userId, householdId, name: body.name, quantity: body.quantity ?? 1, traceContext: { requestId } });
+        const payload = await store.addItem({ userId, householdId, name: body.name, quantity: body.quantity ?? 1, traceContext: { requestId } });
         logRequest({ requestId, method, path: url.pathname, userId, status: 201 });
         return sendJson(res, 201, payload, requestId);
       }
@@ -220,21 +247,21 @@ export function createApp(config = {}) {
       if (method === 'PATCH' && /^\/households\/[^/]+\/items\/[^/]+$/.test(url.pathname)) {
         const [, , householdId, , itemId] = url.pathname.split('/');
         const body = parseBody(toggleItemSchema, await readBody(req));
-        const payload = store.toggleItem({ userId, householdId, itemId, expectedVersion: body.expectedVersion, traceContext: { requestId } });
+        const payload = await store.toggleItem({ userId, householdId, itemId, expectedVersion: body.expectedVersion, traceContext: { requestId } });
         logRequest({ requestId, method, path: url.pathname, userId, status: 200 });
         return sendJson(res, 200, payload, requestId);
       }
 
       if (method === 'GET' && /^\/households\/[^/]+\/activity$/.test(url.pathname)) {
         const householdId = url.pathname.split('/')[2];
-        const payload = store.getActivity({ userId, householdId });
+        const payload = await store.getActivity({ userId, householdId });
         logRequest({ requestId, method, path: url.pathname, userId, status: 200 });
         return sendJson(res, 200, payload, requestId);
       }
 
       if (method === 'GET' && /^\/households\/[^/]+\/stream$/.test(url.pathname)) {
         const householdId = url.pathname.split('/')[2];
-        store.assertMember(userId, householdId);
+        await store.assertMember(userId, householdId);
         setupSseHeaders(res, requestId);
 
         const unsubscribe = store.onHouseholdEvent(householdId, (event) => {
@@ -257,7 +284,7 @@ export function createApp(config = {}) {
 
       if (method === 'GET' && /^\/households\/[^/]+\/budget$/.test(url.pathname)) {
         const householdId = url.pathname.split('/')[2];
-        const payload = store.getBudget({ userId, householdId });
+        const payload = await store.getBudget({ userId, householdId });
         logRequest({ requestId, method, path: url.pathname, userId, status: 200 });
         return sendJson(res, 200, payload, requestId);
       }
@@ -265,7 +292,7 @@ export function createApp(config = {}) {
       if (method === 'PUT' && /^\/households\/[^/]+\/budget$/.test(url.pathname)) {
         const householdId = url.pathname.split('/')[2];
         const body = parseBody(setBudgetSchema, await readBody(req));
-        const payload = store.setBudgetLimit({ userId, householdId, limit: body.limit, traceContext: { requestId } });
+        const payload = await store.setBudgetLimit({ userId, householdId, limit: body.limit, traceContext: { requestId } });
         logRequest({ requestId, method, path: url.pathname, userId, status: 200 });
         return sendJson(res, 200, payload, requestId);
       }
@@ -274,7 +301,7 @@ export function createApp(config = {}) {
       if (method === 'POST' && /^\/households\/[^/]+\/receipts\/upload-url$/.test(url.pathname)) {
         const householdId = url.pathname.split('/')[2];
         const body = parseBody(uploadUrlSchema, await readBody(req));
-        const payload = store.createReceiptUploadUrl({ userId, householdId, fileName: body.fileName, traceContext: { requestId } });
+        const payload = await store.createReceiptUploadUrl({ userId, householdId, fileName: body.fileName, traceContext: { requestId } });
         logRequest({ requestId, method, path: url.pathname, userId, status: 201 });
         return sendJson(res, 201, payload, requestId);
       }
@@ -282,14 +309,14 @@ export function createApp(config = {}) {
       if (method === 'POST' && /^\/households\/[^/]+\/receipts\/ocr-jobs$/.test(url.pathname)) {
         const householdId = url.pathname.split('/')[2];
         const body = parseBody(enqueueOcrSchema, await readBody(req));
-        const payload = store.enqueueReceiptOcrJob({ userId, householdId, objectKey: body.objectKey, apiRequestId: requestId, traceContext: { requestId } });
+        const payload = await store.enqueueReceiptOcrJob({ userId, householdId, objectKey: body.objectKey, apiRequestId: requestId, traceContext: { requestId } });
         logRequest({ requestId, method, path: url.pathname, userId, status: 202 });
         return sendJson(res, 202, payload, requestId);
       }
 
       if (method === 'GET' && /^\/households\/[^/]+\/receipts\/ocr-jobs$/.test(url.pathname)) {
         const householdId = url.pathname.split('/')[2];
-        const payload = store.listReceiptOcrJobs({ userId, householdId });
+        const payload = await store.listReceiptOcrJobs({ userId, householdId });
         logRequest({ requestId, method, path: url.pathname, userId, status: 200 });
         return sendJson(res, 200, payload, requestId);
       }
@@ -297,7 +324,7 @@ export function createApp(config = {}) {
 
       if (method === 'POST' && /^\/households\/[^/]+\/receipts\/ocr-jobs\/[^/]+\/retry$/.test(url.pathname)) {
         const [, , householdId, , , jobId] = url.pathname.split('/');
-        const payload = store.retryReceiptOcrJob({ userId, householdId, jobId, traceContext: { requestId } });
+        const payload = await store.retryReceiptOcrJob({ userId, householdId, jobId, traceContext: { requestId } });
         logRequest({ requestId, method, path: url.pathname, userId, status: 202 });
         return sendJson(res, 202, payload, requestId);
       }
@@ -305,14 +332,14 @@ export function createApp(config = {}) {
       if (method === 'PATCH' && /^\/households\/[^/]+\/receipts\/ocr-jobs\/[^/]+\/correct$/.test(url.pathname)) {
         const [, , householdId, , , jobId] = url.pathname.split('/');
         const body = parseBody(correctOcrSchema, await readBody(req));
-        const payload = store.correctReceiptOcrJob({ userId, householdId, jobId, store: body.store, items: body.items, traceContext: { requestId } });
+        const payload = await store.correctReceiptOcrJob({ userId, householdId, jobId, store: body.store, items: body.items, traceContext: { requestId } });
         logRequest({ requestId, method, path: url.pathname, userId, status: 200 });
         return sendJson(res, 200, payload, requestId);
       }
 
       if (method === 'POST' && /^\/households\/[^/]+\/receipts\/ocr-jobs\/[^/]+\/apply$/.test(url.pathname)) {
         const [, , householdId, , , jobId] = url.pathname.split('/');
-        const payload = store.applyReceiptOcrJobResult({ userId, householdId, jobId, applyRequestId: requestId, traceContext: { requestId } });
+        const payload = await store.applyReceiptOcrJobResult({ userId, householdId, jobId, applyRequestId: requestId, traceContext: { requestId } });
         logRequest({ requestId, method, path: url.pathname, userId, status: 200 });
         return sendJson(res, 200, payload, requestId);
       }
@@ -320,21 +347,21 @@ export function createApp(config = {}) {
       if (method === 'POST' && /^\/households\/[^/]+\/receipts$/.test(url.pathname)) {
         const householdId = url.pathname.split('/')[2];
         const body = parseBody(addReceiptSchema, await readBody(req));
-        const payload = store.addReceipt({ userId, householdId, store: body.store ?? 'unknown', items: body.items, traceContext: { requestId } });
+        const payload = await store.addReceipt({ userId, householdId, store: body.store ?? 'unknown', items: body.items, traceContext: { requestId } });
         logRequest({ requestId, method, path: url.pathname, userId, status: 201 });
         return sendJson(res, 201, payload, requestId);
       }
 
       if (method === 'GET' && /^\/households\/[^/]+\/receipts$/.test(url.pathname)) {
         const householdId = url.pathname.split('/')[2];
-        const payload = store.listReceipts({ userId, householdId });
+        const payload = await store.listReceipts({ userId, householdId });
         logRequest({ requestId, method, path: url.pathname, userId, status: 200 });
         return sendJson(res, 200, payload, requestId);
       }
 
       if (method === 'GET' && /^\/households\/[^/]+\/pantry$/.test(url.pathname)) {
         const householdId = url.pathname.split('/')[2];
-        const payload = store.getPantry({ userId, householdId });
+        const payload = await store.getPantry({ userId, householdId });
         logRequest({ requestId, method, path: url.pathname, userId, status: 200 });
         return sendJson(res, 200, payload, requestId);
       }
@@ -342,9 +369,41 @@ export function createApp(config = {}) {
       if (method === 'POST' && /^\/households\/[^/]+\/pantry$/.test(url.pathname)) {
         const householdId = url.pathname.split('/')[2];
         const body = parseBody(addPantrySchema, await readBody(req));
-        const payload = store.addPantryItem({ userId, householdId, name: body.name, quantity: body.quantity ?? 1, traceContext: { requestId } });
+        const payload = await store.addPantryItem({ userId, householdId, name: body.name, quantity: body.quantity ?? 1, traceContext: { requestId } });
         logRequest({ requestId, method, path: url.pathname, userId, status: 201 });
         return sendJson(res, 201, payload, requestId);
+      }
+
+      if (method === 'POST' && /^\/households\/[^/]+\/voice\/parse$/.test(url.pathname)) {
+        const householdId = url.pathname.split('/')[2];
+        const body = parseBody(voiceParseSchema, await readBody(req));
+        const payload = await store.parseVoiceItems({
+          userId,
+          householdId,
+          transcript: body.transcript,
+          locale: body.locale ?? 'ks',
+          addToList: body.addToList ?? false,
+          contractVersion: body.contractVersion ?? 'v1',
+          traceContext: { requestId },
+        });
+        logRequest({ requestId, method, path: url.pathname, userId, status: 200 });
+        return sendJson(res, 200, payload, requestId);
+      }
+
+      if (method === 'POST' && /^\/households\/[^/]+\/barcodes\/lookup$/.test(url.pathname)) {
+        const householdId = url.pathname.split('/')[2];
+        const body = parseBody(barcodeLookupSchema, await readBody(req));
+        const payload = await store.lookupBarcode({
+          userId,
+          householdId,
+          barcode: body.barcode,
+          locale: body.locale ?? 'ks',
+          quantity: body.quantity ?? 1,
+          addToList: body.addToList ?? false,
+          traceContext: { requestId },
+        });
+        logRequest({ requestId, method, path: url.pathname, userId, status: 200 });
+        return sendJson(res, 200, payload, requestId);
       }
 
       if (method === 'GET' && /^\/households\/[^/]+\/pricing\/estimate$/.test(url.pathname)) {
@@ -357,7 +416,7 @@ export function createApp(config = {}) {
 
       if (method === 'GET' && /^\/households\/[^/]+\/flyers$/.test(url.pathname)) {
         const householdId = url.pathname.split('/')[2];
-        const payload = store.listFlyers({ userId, householdId });
+        const payload = await store.listFlyers({ userId, householdId });
         logRequest({ requestId, method, path: url.pathname, userId, status: 200 });
         return sendJson(res, 200, payload, requestId);
       }
@@ -365,7 +424,7 @@ export function createApp(config = {}) {
 
       if (method === 'POST' && /^\/households\/[^/]+\/recipes\/[^/]+\/add-to-list$/.test(url.pathname)) {
         const [, , householdId, , recipeKey] = url.pathname.split('/');
-        const payload = store.addRecipeIngredientsToList({ userId, householdId, recipeKey, traceContext: { requestId } });
+        const payload = await store.addRecipeIngredientsToList({ userId, householdId, recipeKey, traceContext: { requestId } });
         logRequest({ requestId, method, path: url.pathname, userId, status: 200 });
         return sendJson(res, 200, payload, requestId);
       }
@@ -430,6 +489,16 @@ export function createApp(config = {}) {
         logRequest({ requestId, method, path: url.pathname, userId, status: 401, error: message });
         return sendJson(res, 401, { error: 'Invalid authentication token' }, requestId);
       }
+      if (message === 'AUTH_INSECURE_METHOD_DISABLED') {
+        store.recordSecurityAudit({ event: 'auth_insecure_method_disabled', requestId, userId, path: url.pathname, reason: message });
+        logRequest({ requestId, method, path: url.pathname, userId, status: 401, error: message });
+        return sendJson(res, 401, { error: 'Insecure auth methods are disabled in this environment' }, requestId);
+      }
+      if (message === 'AUTH_SECRET_MISSING') {
+        store.recordSecurityAudit({ event: 'auth_secret_missing', requestId, userId, path: url.pathname, reason: message });
+        logRequest({ requestId, method, path: url.pathname, userId, status: 500, error: message });
+        return sendJson(res, 500, { error: 'Server auth configuration error' }, requestId);
+      }
       if (message === 'RATE_LIMIT_GLOBAL') {
         store.recordSecurityAudit({ event: 'rate_limit_global', requestId, userId, path: url.pathname });
         logRequest({ requestId, method, path: url.pathname, userId, status: 429, error: message });
@@ -439,6 +508,15 @@ export function createApp(config = {}) {
         store.recordSecurityAudit({ event: 'rate_limit_ai', requestId, userId, path: url.pathname });
         logRequest({ requestId, method, path: url.pathname, userId, status: 429, error: message });
         return sendJson(res, 429, { error: 'AI endpoint rate limit exceeded' }, requestId);
+      }
+      if (message === 'RATE_LIMIT_SMART_INPUT') {
+        store.recordSecurityAudit({ event: 'rate_limit_smart_input', requestId, userId, path: url.pathname });
+        logRequest({ requestId, method, path: url.pathname, userId, status: 429, error: message });
+        return sendJson(res, 429, { error: 'Smart input rate limit exceeded' }, requestId);
+      }
+      if (message === 'VOICE_CONTRACT_UNSUPPORTED') {
+        logRequest({ requestId, method, path: url.pathname, userId, status: 400, error: message });
+        return sendJson(res, 400, { error: 'Unsupported voice contract version' }, requestId);
       }
       if (message === 'ITEM_NOT_FOUND') {
         logRequest({ requestId, method, path: url.pathname, userId, status: 404, error: message });
@@ -472,6 +550,10 @@ export function createApp(config = {}) {
         logRequest({ requestId, method, path: url.pathname, userId, status: 404, error: message });
         return sendJson(res, 404, { error: 'Recipe not found' }, requestId);
       }
+      if (message === 'BARCODE_NOT_FOUND') {
+        logRequest({ requestId, method, path: url.pathname, userId, status: 404, error: message });
+        return sendJson(res, 404, { error: 'Barcode not found' }, requestId);
+      }
       if (message.startsWith('VALIDATION_')) {
         logRequest({ requestId, method, path: url.pathname, userId, status: 400, error: message });
         return sendJson(res, 400, { error: message }, requestId);
@@ -487,7 +569,7 @@ export function createApp(config = {}) {
 
   const wsConnections = new Map();
 
-  server.on('upgrade', (req, socket) => {
+  server.on('upgrade', async (req, socket) => {
     try {
       const url = new URL(req.url || '/', 'http://localhost');
       if (!/^\/ws\/households\/[^/]+$/.test(url.pathname)) {
@@ -500,7 +582,7 @@ export function createApp(config = {}) {
         socket.destroy();
         return;
       }
-      store.assertMember(userId, householdId);
+      await store.assertMember(userId, householdId);
 
       const wsKey = req.headers['sec-websocket-key'];
       if (typeof wsKey !== 'string') {
@@ -540,12 +622,28 @@ export function createApp(config = {}) {
   return server;
 }
 
+async function createCoreRepositoryFromEnv() {
+  if (!process.env.DATABASE_URL) return null;
+  const { PostgresHouseholdRepository } = await import('./repositories/postgres-household-repository.js');
+  return new PostgresHouseholdRepository({
+    connectionString: process.env.DATABASE_URL,
+    schema: process.env.DB_SCHEMA || null,
+  });
+}
+
 if (import.meta.url === `file://${process.argv[1]}`) {
   const port = Number(process.env.PORT || 4000);
-  createCacheFromEnv().then((cache) => {
-    createApp({ cache }).listen(port, () => {
+  Promise.all([createCacheFromEnv(), createCoreRepositoryFromEnv()])
+    .then(([cache, coreRepository]) => {
+      const requirePersistentStore = process.env.NODE_ENV === 'production' && process.env.ALLOW_INMEMORY_FALLBACK !== '1';
+      createApp({ cache, coreRepository, requirePersistentStore }).listen(port, () => {
+        // eslint-disable-next-line no-console
+        console.log(`SmartCart backend listening on ${port}`);
+      });
+    })
+    .catch((error) => {
       // eslint-disable-next-line no-console
-      console.log(`SmartCart backend listening on ${port}`);
+      console.error(`Failed to start SmartCart backend: ${error.message}`);
+      process.exitCode = 1;
     });
-  });
 }
