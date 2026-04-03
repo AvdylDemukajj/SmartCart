@@ -42,7 +42,6 @@ jobs:
         uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITLEAKS_CONFIG: .gitleaks.toml
 
   dependency-and-image-scan:
     env:
@@ -66,19 +65,12 @@ jobs:
       - name: Dependency vulnerability gate (npm audit)
         run: npm audit --audit-level=high
 
-      - name: Resolve digest pin input
-        id: digest
+      - name: Validate digest pin input
         run: |
-          if [ -n "$NODE_BASE_DIGEST" ]; then
-            echo "has_digest=true" >> "$GITHUB_OUTPUT"
-            echo "Using pinned digest: $NODE_BASE_DIGEST"
-          else
-            echo "has_digest=false" >> "$GITHUB_OUTPUT"
-            echo "WARNING: NODE_BASE_DIGEST repo variable is missing; image build+image-scan steps are skipped." 
-          fi
+          test -n "$NODE_BASE_DIGEST" || (echo "Missing repo variable NODE_BASE_DIGEST (sha256:...)" && exit 1)
+          echo "Using pinned digest: $NODE_BASE_DIGEST"
 
       - name: Build backend image
-        if: steps.digest.outputs.has_digest == 'true'
         run: docker build --build-arg NODE_BASE_DIGEST=$NODE_BASE_DIGEST -t smartcart-backend:security-gate -f Dockerfile .
 
       - name: Trivy filesystem scan (HIGH/CRITICAL)
@@ -91,7 +83,6 @@ jobs:
           exit-code: '1'
 
       - name: Trivy image scan (HIGH/CRITICAL)
-        if: steps.digest.outputs.has_digest == 'true'
         uses: aquasecurity/trivy-action@0.28.0
         with:
           image-ref: 'smartcart-backend:security-gate'
