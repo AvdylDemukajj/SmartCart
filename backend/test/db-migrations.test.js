@@ -1,4 +1,4 @@
-import { readFile } from 'node:fs/promises';
+import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -11,9 +11,12 @@ async function loadSql(relativePath) {
 
 test('migration chain keeps parity with schema.sql core tables', async () => {
   const schemaSql = await loadSql('db/schema.sql');
-  const migration1 = await loadSql('db/migrations/0001_initial.sql');
-  const migration3 = await loadSql('db/migrations/0003_schema_parity_and_rls.sql');
-  const combinedMigrations = `${migration1}\n${migration3}`.toLowerCase();
+  const migrationDir = path.join(ROOT, 'db/migrations');
+  const migrationFiles = (await readdir(migrationDir))
+    .filter((name) => /^\d+_.*\.sql$/.test(name))
+    .sort();
+  const migrationSql = await Promise.all(migrationFiles.map((name) => readFile(path.join(migrationDir, name), 'utf8')));
+  const combinedMigrations = migrationSql.join('\n').toLowerCase();
 
   const tableRegex = /create table if not exists\s+([a-z_]+)/gi;
   const schemaTables = new Set();

@@ -1,0 +1,37 @@
+name: Audit Log Maintenance
+
+on:
+  schedule:
+    - cron: '45 2 * * *'
+  workflow_dispatch:
+
+jobs:
+  audit-maintenance:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      AUDIT_MAINTENANCE_ADMIN_JWT: ${{ secrets.AUDIT_MAINTENANCE_ADMIN_JWT }}
+      AUDIT_LOG_INTEGRITY_SALT: ${{ secrets.AUDIT_LOG_INTEGRITY_SALT }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run audit integrity + retention maintenance
+        run: |
+          node ../scripts/audit-log-maintenance.mjs > ../docs/ops/evidence/audit-log-maintenance-${{ github.run_id }}.json
+
+      - name: Upload maintenance evidence artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: audit-log-maintenance-evidence-${{ github.run_id }}
+          path: docs/ops/evidence/audit-log-maintenance-${{ github.run_id }}.json

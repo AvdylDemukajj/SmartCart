@@ -1,0 +1,21 @@
+{
+  "generatedAt": "2026-04-03T12:03:10.315Z",
+  "households": [
+    {
+      "id": "hh-1",
+      "ownerId": "backup-user",
+      "items": [
+        {
+          "id": "i-1",
+          "name": "Milk"
+        }
+      ]
+    }
+  ],
+  "audit": [
+    {
+      "event": "BACKUP_DRILL",
+      "ts": "2026-04-03T12:03:10.315Z"
+    }
+  ]
+}

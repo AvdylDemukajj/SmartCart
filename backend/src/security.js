@@ -26,7 +26,7 @@ function verifyJwtSignature(unsignedToken, signature, secret) {
   return timingSafeEqual(actual, expected);
 }
 
-function verifyJwt(token) {
+function verifyJwtWithPayload(token) {
   const parts = token.split('.');
   if (parts.length !== 3) throw new Error('AUTH_INVALID_TOKEN');
 
@@ -58,10 +58,13 @@ function verifyJwt(token) {
   const userId = payload.sub ?? payload.userId;
   if (typeof userId !== 'string' || !userId.trim()) throw new Error('AUTH_INVALID_TOKEN');
 
-  return userId.trim();
+  return {
+    userId: userId.trim(),
+    payload,
+  };
 }
 
-export function resolveUserId(req) {
+export function resolveAuthContext(req) {
   const allowInsecureDevAuth = process.env.ALLOW_INSECURE_DEV_AUTH === 'true'
     || !process.env.NODE_ENV
     || process.env.NODE_ENV === 'development'
@@ -69,7 +72,11 @@ export function resolveUserId(req) {
   const headerUser = req.headers['x-user-id'];
   if (typeof headerUser === 'string' && headerUser.trim()) {
     if (!allowInsecureDevAuth) throw new Error('AUTH_INSECURE_METHOD_DISABLED');
-    return headerUser.trim();
+    return {
+      userId: headerUser.trim(),
+      method: 'x-user-id',
+      claims: null,
+    };
   }
 
   const authorization = req.headers.authorization;
@@ -80,19 +87,45 @@ export function resolveUserId(req) {
     if (!allowInsecureDevAuth) throw new Error('AUTH_INSECURE_METHOD_DISABLED');
     const userId = token.replace('dev-user:', '').trim();
     if (!userId) throw new Error('AUTH_INVALID_TOKEN');
-    return userId;
+    return {
+      userId,
+      method: 'bearer-dev-user',
+      claims: null,
+    };
   }
 
-  return verifyJwt(token);
+  const verified = verifyJwtWithPayload(token);
+  return {
+    userId: verified.userId,
+    method: 'bearer-jwt',
+    claims: verified.payload,
+  };
 }
 
-export function createTestJwt({ sub, secret = 'dev-secret', expiresInSec = 3600, iss, aud }) {
+export function resolveUserId(req) {
+  const context = resolveAuthContext(req);
+  return context?.userId ?? null;
+}
+
+export function createTestJwt({
+  sub,
+  secret = 'dev-secret',
+  expiresInSec = 3600,
+  iss,
+  aud,
+  role,
+  roles,
+  permissions,
+}) {
   const header = encodeBase64Url(Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })));
   const payload = encodeBase64Url(Buffer.from(JSON.stringify({
     sub,
     exp: Math.floor(Date.now() / 1000) + expiresInSec,
     ...(iss ? { iss } : {}),
     ...(aud ? { aud } : {}),
+    ...(role ? { role } : {}),
+    ...(roles ? { roles } : {}),
+    ...(permissions ? { permissions } : {}),
   })));
   const signature = encodeBase64Url(createHmac('sha256', secret).update(`${header}.${payload}`).digest());
   return `${header}.${payload}.${signature}`;
@@ -125,5 +158,48 @@ export class FixedWindowRateLimiter {
 
     existing.count += 1;
     return { allowed: true, remaining: this.limit - existing.count, resetInSec: Math.ceil((existing.expiresAt - now) / 1000) };
+  }
+}
+
+
+export class DistributedTokenBucketRateLimiter {
+  constructor({ cache, prefix = 'rate', capacity, refillRatePerSec, ttlSec = 120 }) {
+    this.cache = cache;
+    this.prefix = prefix;
+    this.capacity = capacity;
+    this.refillRatePerSec = refillRatePerSec;
+    this.ttlSec = ttlSec;
+  }
+
+  async take(key, { nowMs = Date.now() } = {}) {
+    const bucketKey = `${this.prefix}:${key}`;
+    const fallbackReset = Math.max(1, Math.ceil(this.capacity / this.refillRatePerSec));
+    const state = await this.cache.getJson(bucketKey) ?? {
+      tokens: this.capacity,
+      lastRefillMs: nowMs,
+    };
+
+    const elapsedMs = Math.max(0, nowMs - Number(state.lastRefillMs || nowMs));
+    const refillTokens = (elapsedMs / 1000) * this.refillRatePerSec;
+    const available = Math.min(this.capacity, Number(state.tokens ?? this.capacity) + refillTokens);
+
+    if (available < 1) {
+      const nextState = { tokens: available, lastRefillMs: nowMs };
+      await this.cache.setJson(bucketKey, nextState, this.ttlSec);
+      const deficit = 1 - available;
+      return {
+        allowed: false,
+        remaining: 0,
+        resetInSec: Math.max(1, Math.ceil(deficit / this.refillRatePerSec)),
+      };
+    }
+
+    const nextTokens = available - 1;
+    await this.cache.setJson(bucketKey, { tokens: nextTokens, lastRefillMs: nowMs }, this.ttlSec);
+    return {
+      allowed: true,
+      remaining: Math.max(0, Math.floor(nextTokens)),
+      resetInSec: fallbackReset,
+    };
   }
 }

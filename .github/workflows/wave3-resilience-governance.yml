@@ -1,0 +1,54 @@
+name: Wave3 Resilience & Governance Gates
+
+on:
+  push:
+    paths:
+      - 'backend/**'
+      - 'scripts/**'
+      - 'docs/security/**'
+      - '.github/workflows/wave3-resilience-governance.yml'
+  pull_request:
+    paths:
+      - 'backend/**'
+      - 'scripts/**'
+      - 'docs/security/**'
+      - '.github/workflows/wave3-resilience-governance.yml'
+  workflow_dispatch:
+
+jobs:
+  resilience-and-governance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: npm ci
+
+      - name: Data governance policy tests
+        working-directory: backend
+        run: node --test test/data-governance.test.js
+
+      - name: Chaos drill (DB/Redis/network partition scenarios)
+        run: node scripts/run-chaos-drill.mjs > /tmp/chaos-drill.json
+
+      - name: Backup/restore drill with evidence
+        run: node scripts/run-backup-restore-drill.mjs > /tmp/backup-restore-drill.json
+
+      - name: Multi-zone readiness test (RTO/RPO evidence)
+        run: node scripts/run-multi-zone-readiness.mjs > /tmp/multi-zone-readiness.json
+
+      - name: Upload resilience evidence artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: wave3-resilience-evidence
+          path: |
+            /tmp/chaos-drill.json
+            /tmp/backup-restore-drill.json
+            /tmp/multi-zone-readiness.json
