@@ -1,0 +1,92 @@
+name: Backend Nightly Load Gate
+
+on:
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+jobs:
+  load-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install backend dependencies
+        run: npm ci
+
+      - name: Install k6
+        run: |
+          sudo gpg -k
+          sudo apt-get update
+          sudo apt-get install -y gnupg ca-certificates
+          sudo gpg -q -n --import --import-options import-show https://dl.k6.io/key.gpg
+          echo "deb https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
+          sudo apt-get update
+          sudo apt-get install -y k6
+
+      - name: Install Artillery CLI
+        run: npm install -g artillery@2
+
+      - name: Start backend
+        run: |
+          node src/server.js > /tmp/smartcart-nightly.log 2>&1 &
+          echo $! > /tmp/smartcart-nightly.pid
+
+      - name: Wait for health
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:4000/health >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Backend failed to start"
+          tail -n 200 /tmp/smartcart-nightly.log || true
+          exit 1
+
+      - name: k6 baseline profile (gate)
+        env:
+          BASE_URL: http://127.0.0.1:4000
+          K6_P95_MS: '250'
+          K6_P99_MS: '450'
+          K6_BASELINE_VUS: '10'
+          K6_BASELINE_DURATION: '90s'
+        run: k6 run load/k6-baseline.js
+
+      - name: Artillery stress profile (gate)
+        env:
+          BASE_URL: http://127.0.0.1:4000
+          ARTILLERY_P95_MS: '350'
+          ARTILLERY_P99_MS: '700'
+          ARTILLERY_ERROR_RATE_MAX: '0.015'
+        run: |
+          artillery run load/artillery-stress.yml --output /tmp/artillery-stress.json
+          node ../scripts/run-load-gate.mjs /tmp/artillery-stress.json
+
+      - name: k6 soak profile (gate)
+        env:
+          BASE_URL: http://127.0.0.1:4000
+          K6_SOAK_P95_MS: '350'
+          K6_SOAK_P99_MS: '650'
+          K6_SOAK_VUS: '20'
+          K6_SOAK_WARMUP: '2m'
+          K6_SOAK_STEADY: '12m'
+          K6_SOAK_COOLDOWN: '2m'
+        run: k6 run load/k6-soak.js
+
+      - name: Stop backend
+        if: always()
+        run: |
+          if [ -f /tmp/smartcart-nightly.pid ]; then
+            kill "$(cat /tmp/smartcart-nightly.pid)" || true
+          fi

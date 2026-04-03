@@ -9,10 +9,11 @@ Backend API për SmartCart AI me module MVP + foundations për features e PRD-s�
 - Pricing estimate + flyers hints
 - Pricing staging -> promotion workflow me validim bazik
 - Canonical product matching + confidence scores (pricing pipeline)
-- Pricing estimate cache me TTL 6 orë
+- Pricing estimate cache me TTL 6 orë + cache-audit counters (hit/miss/coalesced)
 - Receipts ingestion (manual payload) + budget updates
 - Presigned upload URL (simuluar) + OCR jobs workflow
 - OCR retry + dead-letter + manual correction flow
+- OCR retry backoff + replay-token dedupe controls for resilience
 - Pantry tracking
 - Recipe suggestions (AI provider-ready: OpenAI fallback to stub) + rate limiting (3/ditë për user)
 - Recipe prompt templates + response cache (TTL)
@@ -23,7 +24,7 @@ Backend API për SmartCart AI me module MVP + foundations për features e PRD-s�
 - Full app repository abstraction (households/lists/budget/receipts/pantry/ocr)
 - Repository pattern fillestar (pricing repository i ndarë)
 - JWT auth verification (HS256) me secret rotation (`AUTH_JWT_SECRETS`)
-- Global + AI endpoint rate limiting (fixed-window)
+- Global + AI endpoint rate limiting (distributed token-bucket when cache backend is shared, fixed-window fallback)
 - Security audit log endpoint (`/security/audit-log`)
 - RLS migration policies për tabelat tenant-bound
 - Observability metrics endpoint (`/metrics`) me p95/error-rate/queue-depth
@@ -66,9 +67,27 @@ Secrets për JWT verification/rotation:
 - `AUTH_JWT_ISSUER` (opsionale, por e rekomanduar në production)
 - `AUTH_JWT_AUDIENCE` (opsionale, por e rekomanduar në production)
 - `SECURITY_AUDIT_ADMIN_USER_ID` (default `admin`)
-- `SECURITY_AUDIT_ADMIN_KEY` (opsionale për akses me `x-admin-key`)
+- `SECURITY_AUDIT_ADMIN_USERS` (opsionale, listë comma-separated e user IDs admin)
+  - Alternative: JWT claims (`role`, `roles`, `permissions`) për admin access te audit endpoints.
 - `REDIS_URL` (opsionale për real cache backend)
 - `AI_PROVIDER=openai`, `OPENAI_API_KEY`, `OPENAI_MODEL` (opsionale për AI provider real)
+- `ALLOW_INMEMORY_CACHE_FALLBACK=1` (opsionale; lejon cache fallback në prod kur Redis mungon)
+- `MAX_REQUEST_BODY_BYTES` (default 1048576)
+- `HTTP_REQUEST_TIMEOUT_MS` (default 30000)
+- `HTTP_HEADERS_TIMEOUT_MS` (default 31000)
+- `WS_ALLOWED_ORIGINS` (opsionale, comma-separated origins allowlist)
+- `MAX_WS_CONNECTIONS` (default 5000)
+- `MAX_WS_CONNECTIONS_PER_USER` (default 20)
+- `WS_IDLE_TIMEOUT_MS` (default 120000)
+- `WS_HEARTBEAT_INTERVAL_MS` (default 30000)
+- `WS_HEARTBEAT_GRACE_MS` (default 90000)
+- `MAX_WS_FRAME_BYTES` (default 16384; close code `1009` kur frame është shumë i madh)
+- `AUDIT_LOG_RETENTION_DAYS` (default 90)
+- `AUDIT_LOG_MAX_ENTRIES` (default 500)
+- `AUDIT_LOG_INTEGRITY_SALT` (**required in production**; pa këtë serveri nuk nis)
+- `ENABLE_DISTRIBUTED_RATE_LIMITER` (default `true`; përdor token-bucket state në cache shared)
+- `OTEL_EXPORTER_OTLP_ENDPOINT` (opsionale; kur vendoset aktivizohet OTLP span export)
+- `OTEL_SERVICE_NAME` (default `smartcart-backend`)
 
 ## API Endpoints
 
@@ -76,6 +95,8 @@ Secrets për JWT verification/rotation:
 - `GET /health`
 - `GET /metrics`
 - `GET /security/audit-log` (admin only)
+- `GET /security/audit-log/integrity` (admin only)
+- `POST /security/audit-log/retention/prune` (admin only)
 - `GET /trace/:requestId` (admin only)
 
 ### Households
@@ -151,9 +172,37 @@ Additional docs:
 - `../docs/release/staging-smoke-tests.md`
 - `../docs/release/production-readiness-checklist.md`
 
-Load test starters:
-- `load/k6-smoke.js`
-- `load/artillery-smoke.yml`
+Load test profiles (CI gate ready):
+- `load/k6-baseline.js` (baseline gate with p95/p99 thresholds)
+- `load/artillery-stress.yml` (stress gate + JSON threshold validation)
+- `load/k6-soak.js` (soak gate with p95/p99 thresholds)
+- `load/k6-smoke.js` and `load/artillery-smoke.yml` (quick local smoke)
+
+Nightly load gate workflow:
+- `.github/workflows/backend-nightly-load.yml`
+
+
+Security gates workflow:
+- `.github/workflows/security-gates.yml`
+  - dependency scan: `npm audit --audit-level=high`
+  - image/fs scan: Trivy HIGH/CRITICAL (gate)
+  - SAST: CodeQL
+  - Secret scanning: Gitleaks
+  - SBOM generation (SPDX) + Cosign keyless signing/verification
+  - requires repo variable `NODE_BASE_DIGEST` (sha256 digest for base image pin)
+  - abuse suite: `backend/test/abuse-suite.test.js`
+
+Wave 3 resilience/governance drills:
+- `node ../scripts/run-chaos-drill.mjs`
+- `node ../scripts/run-backup-restore-drill.mjs`
+- `node ../scripts/run-multi-zone-readiness.mjs`
+- Data governance tests: `npm run test:governance`
+
+Threat model + abuse controls doc:
+- `../docs/security/threat-model-b3.md`
+
+Audit log maintenance workflow:
+- `.github/workflows/audit-log-maintenance.yml`
 
 Release governance verification:
 - `node ../scripts/verify-go-live.mjs`

@@ -97,9 +97,12 @@ class SimpleRedisCache {
   }
 }
 
-export async function createCacheFromEnv() {
+export async function createCacheFromEnv({ strict = false } = {}) {
   const url = process.env.REDIS_URL;
-  if (!url) return new InMemoryAsyncCache();
+  if (!url) {
+    if (strict) throw new Error('REDIS_REQUIRED_IN_STRICT_MODE');
+    return new InMemoryAsyncCache();
+  }
 
   try {
     const parsed = new URL(url);
@@ -109,6 +112,7 @@ export async function createCacheFromEnv() {
     await cache.send(['PING']);
     return cache;
   } catch {
+    if (strict) throw new Error('REDIS_UNAVAILABLE_IN_STRICT_MODE');
     return new InMemoryAsyncCache();
   }
 }

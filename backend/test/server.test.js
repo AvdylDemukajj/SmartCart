@@ -44,6 +44,8 @@ test('health endpoint works', async () => {
     assert.equal(body.ok, true);
     assert.equal(Array.isArray(body.modules), true);
     assert.equal(typeof res.headers.get('x-request-id'), 'string');
+    assert.equal(typeof res.headers.get('x-trace-id'), 'string');
+    assert.equal(typeof res.headers.get('traceparent'), 'string');
   });
 });
 
@@ -78,6 +80,7 @@ test('supports bearer jwt auth with valid signature', async () => {
 
 test('enforces jwt issuer and audience when configured', async () => {
   const previousSecret = process.env.AUTH_JWT_SECRET;
+  const previousAuditSalt = process.env.AUDIT_LOG_INTEGRITY_SALT;
   const previousIssuer = process.env.AUTH_JWT_ISSUER;
   const previousAudience = process.env.AUTH_JWT_AUDIENCE;
   process.env.AUTH_JWT_SECRET = 'strict-secret';
@@ -115,6 +118,8 @@ test('enforces jwt issuer and audience when configured', async () => {
   } finally {
     if (previousSecret === undefined) delete process.env.AUTH_JWT_SECRET;
     else process.env.AUTH_JWT_SECRET = previousSecret;
+    if (previousAuditSalt === undefined) delete process.env.AUDIT_LOG_INTEGRITY_SALT;
+    else process.env.AUDIT_LOG_INTEGRITY_SALT = previousAuditSalt;
     if (previousIssuer === undefined) delete process.env.AUTH_JWT_ISSUER;
     else process.env.AUTH_JWT_ISSUER = previousIssuer;
     if (previousAudience === undefined) delete process.env.AUTH_JWT_AUDIENCE;
@@ -679,13 +684,31 @@ test('createApp requires persistent store when requirePersistentStore=true', () 
   );
 });
 
+
+test('production startup requires AUDIT_LOG_INTEGRITY_SALT', () => {
+  const previousNodeEnv = process.env.NODE_ENV;
+  const previousSalt = process.env.AUDIT_LOG_INTEGRITY_SALT;
+  process.env.NODE_ENV = 'production';
+  delete process.env.AUDIT_LOG_INTEGRITY_SALT;
+  try {
+    assert.throws(() => createApp({ requirePersistentStore: false }), /AUDIT_LOG_INTEGRITY_SALT_REQUIRED/);
+  } finally {
+    if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = previousNodeEnv;
+    if (previousSalt === undefined) delete process.env.AUDIT_LOG_INTEGRITY_SALT;
+    else process.env.AUDIT_LOG_INTEGRITY_SALT = previousSalt;
+  }
+});
+
 test('production mode disables x-user-id and dev-user auth methods', async () => {
   const previousNodeEnv = process.env.NODE_ENV;
   const previousAllow = process.env.ALLOW_INSECURE_DEV_AUTH;
   const previousSecret = process.env.AUTH_JWT_SECRET;
+  const previousAuditSalt = process.env.AUDIT_LOG_INTEGRITY_SALT;
   process.env.NODE_ENV = 'production';
   process.env.ALLOW_INSECURE_DEV_AUTH = 'false';
   process.env.AUTH_JWT_SECRET = 'prod-secret';
+  process.env.AUDIT_LOG_INTEGRITY_SALT = 'test-prod-audit-salt';
 
   try {
     await withServer(async (baseUrl) => {
@@ -718,6 +741,8 @@ test('production mode disables x-user-id and dev-user auth methods', async () =>
     else process.env.ALLOW_INSECURE_DEV_AUTH = previousAllow;
     if (previousSecret === undefined) delete process.env.AUTH_JWT_SECRET;
     else process.env.AUTH_JWT_SECRET = previousSecret;
+    if (previousAuditSalt === undefined) delete process.env.AUDIT_LOG_INTEGRITY_SALT;
+    else process.env.AUDIT_LOG_INTEGRITY_SALT = previousAuditSalt;
   }
 });
 
@@ -738,6 +763,7 @@ test('metrics endpoint returns p95 and queue depth snapshot', async () => {
     assert.equal(metricsRes.status, 200);
     const metrics = await metricsRes.json();
     assert.equal(typeof metrics.p95Ms, 'number');
+    assert.equal(typeof metrics.p99Ms, 'number');
     assert.equal(typeof metrics.error5xxRate, 'number');
     assert.equal(typeof metrics.queueDepth.total, 'number');
   });
@@ -912,6 +938,33 @@ test('query validation rejects invalid refresh and limit values', async () => {
   });
 });
 
+test('error envelope exposes stable errorCode and requestId fields', async () => {
+  await withServer(async (baseUrl) => {
+    const household = await createHousehold(baseUrl);
+    const invalidRefreshRes = await fetch(`${baseUrl}/households/${household.id}/pricing/estimate?refresh=invalid`, {
+      headers: { 'x-user-id': 'ana' },
+    });
+    assert.equal(invalidRefreshRes.status, 400);
+    const invalidRefreshBody = await invalidRefreshRes.json();
+    assert.equal(invalidRefreshBody.error, 'VALIDATION_QUERY_REFRESH');
+    assert.equal(invalidRefreshBody.errorCode, 'VALIDATION_QUERY_REFRESH');
+    assert.equal(typeof invalidRefreshBody.requestId, 'string');
+  });
+});
+
+test('not found responses use the standardized error envelope', async () => {
+  await withServer(async (baseUrl) => {
+    const res = await fetch(`${baseUrl}/this-route-does-not-exist`, {
+      headers: { 'x-user-id': 'ana' },
+    });
+    assert.equal(res.status, 404);
+    const body = await res.json();
+    assert.equal(body.error, 'Not found');
+    assert.equal(body.errorCode, 'NOT_FOUND');
+    assert.equal(typeof body.requestId, 'string');
+  });
+});
+
 
 test('toggle payload validation rejects invalid expectedVersion', async () => {
   await withServer(async (baseUrl) => {
@@ -968,5 +1021,85 @@ test('global and ai rate limits return 429 when exceeded', async () => {
     globalRateWindowMs: 60_000,
     aiRateLimit: 1,
     aiRateWindowMs: 60_000,
+  });
+});
+
+test('audit log access supports jwt admin role claim', async () => {
+  await withServer(async (baseUrl) => {
+    await createHousehold(baseUrl, 'ana');
+    await fetch(`${baseUrl}/households`, {
+      method: 'GET',
+      headers: { 'x-user-id': 'outsider' },
+    });
+
+    const adminJwt = createTestJwt({ sub: 'sec-user', role: 'admin' });
+    const res = await fetch(`${baseUrl}/security/audit-log`, {
+      headers: { authorization: `Bearer ${adminJwt}` },
+    });
+    assert.equal(res.status, 200);
+  });
+});
+
+test('audit log access supports jwt permissions claim string', async () => {
+  await withServer(async (baseUrl) => {
+    await createHousehold(baseUrl, 'ana');
+    const adminJwt = createTestJwt({ sub: 'sec-user-2', permissions: 'security:audit:read' });
+    const res = await fetch(`${baseUrl}/security/audit-log`, {
+      headers: { authorization: `Bearer ${adminJwt}` },
+    });
+    assert.equal(res.status, 200);
+  });
+});
+
+test('rejects oversized request bodies with 413', async () => {
+  const previousMax = process.env.MAX_REQUEST_BODY_BYTES;
+  process.env.MAX_REQUEST_BODY_BYTES = '64';
+  try {
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/households`, {
+        method: 'POST',
+        headers: { 'x-user-id': 'ana', 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'This household name is intentionally long to exceed the body limit' }),
+      });
+      assert.equal(res.status, 413);
+    });
+  } finally {
+    if (previousMax === undefined) delete process.env.MAX_REQUEST_BODY_BYTES;
+    else process.env.MAX_REQUEST_BODY_BYTES = previousMax;
+  }
+});
+
+
+test('audit integrity endpoint returns 200 for valid log chain', async () => {
+  await withServer(async (baseUrl) => {
+    await fetch(`${baseUrl}/households/unknown/items`, { headers: { 'x-user-id': 'outsider' } });
+
+    const adminJwt = createTestJwt({ sub: 'sec-admin-int', role: 'admin', permissions: ['security:audit:read'] });
+    const res = await fetch(`${baseUrl}/security/audit-log/integrity`, {
+      headers: { authorization: `Bearer ${adminJwt}` },
+    });
+    assert.equal(res.status, 200);
+    const payload = await res.json();
+    assert.equal(payload.ok, true);
+  });
+});
+
+test('audit retention prune endpoint requires admin and succeeds for admin', async () => {
+  await withServer(async (baseUrl) => {
+    const forbidden = await fetch(`${baseUrl}/security/audit-log/retention/prune`, {
+      method: 'POST',
+      headers: { 'x-user-id': 'ana' },
+    });
+    assert.equal(forbidden.status, 403);
+
+    const adminJwt = createTestJwt({ sub: 'sec-admin-prune', role: 'admin', permissions: ['security:audit:read'] });
+    const res = await fetch(`${baseUrl}/security/audit-log/retention/prune`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${adminJwt}` },
+    });
+    assert.equal(res.status, 200);
+    const payload = await res.json();
+    assert.equal(typeof payload.deleted, 'number');
+    assert.equal(typeof payload.retained, 'number');
   });
 });

@@ -1,0 +1,22 @@
+{
+  "startedAt": "2026-04-03T12:03:34.244Z",
+  "failover": {
+    "primaryDownAt": "2026-04-03T12:03:34.744Z",
+    "failoverCompleteAt": "2026-04-03T12:03:38.944Z",
+    "lastReplicatedWriteAt": "2026-04-03T12:03:33.544Z",
+    "recoveredWriteVisibleAt": "2026-04-03T12:03:38.944Z"
+  },
+  "evidence": {
+    "rtoSeconds": 4.2,
+    "rpoSeconds": 5.4,
+    "targets": {
+      "rtoSecondsMax": 900,
+      "rpoSecondsMax": 60
+    },
+    "pass": true
+  },
+  "notes": [
+    "Use real multi-zone failover telemetry in staging/prod drills to replace synthetic timings.",
+    "Keep this output as evidence for quarterly resilience review."
+  ]
+}
