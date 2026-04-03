@@ -38,9 +38,9 @@ jobs:
         with:
           node-version: '22'
           cache: 'npm'
-          cache-dependency-path: backend/package.json
-      - run: npm install
+          cache-dependency-path: backend/package-lock.json
+      - run: npm ci
       - run: npm run typecheck:v2
       - run: npm test
-      - run: npm test -- --test-name-pattern "voice parse|barcode lookup|smart input endpoints enforce dedicated rate limit"
+      - run: npm run test:coverage:gate
       - run: node ../scripts/verify-go-live.mjs

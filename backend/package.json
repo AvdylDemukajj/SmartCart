@@ -7,7 +7,12 @@
     "start": "node src/server.js",
     "test": "node --test",
     "start:v2": "tsx src-v2/main.ts",
-    "typecheck:v2": "tsc --project tsconfig.json --noEmit"
+    "typecheck:v2": "tsc --project tsconfig.json --noEmit",
+    "test:coverage:gate": "node ../scripts/check-coverage-gate.mjs",
+    "test:governance": "node --test test/data-governance.test.js",
+    "drill:chaos": "node ../scripts/run-chaos-drill.mjs",
+    "drill:backup-restore": "node ../scripts/run-backup-restore-drill.mjs",
+    "drill:multi-zone": "node ../scripts/run-multi-zone-readiness.mjs"
   },
   "devDependencies": {
     "typescript": "^5.8.3",

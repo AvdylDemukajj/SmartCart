@@ -237,4 +237,84 @@ export class PostgresHouseholdRepository {
     );
     return result.rows;
   }
+
+
+  async appendSecurityAuditLog(entry) {
+    await this.pool.query(
+      `insert into security_audit_log (
+        id,
+        event,
+        request_id,
+        user_id,
+        path,
+        reason,
+        created_at,
+        prev_hash,
+        hash
+      ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+      [
+        entry.id,
+        entry.event,
+        entry.requestId ?? null,
+        entry.userId ?? null,
+        entry.path ?? null,
+        entry.reason ?? null,
+        entry.createdAt,
+        entry.prevHash,
+        entry.hash,
+      ],
+    );
+  }
+
+  async listSecurityAuditLog({ limit = 100, ascending = false } = {}) {
+    const boundedLimit = Math.max(1, Math.min(5000, Number(limit) || 100));
+    const order = ascending ? 'asc' : 'desc';
+    const result = await this.pool.query(
+      `select
+         id,
+         event,
+         request_id as "requestId",
+         user_id as "userId",
+         path,
+         reason,
+         created_at as "createdAt",
+         prev_hash as "prevHash",
+         hash
+       from security_audit_log
+       order by created_at ${order}, id ${order}
+       limit $1`,
+      [boundedLimit],
+    );
+    return ascending ? result.rows : [...result.rows].reverse();
+  }
+
+  async pruneSecurityAuditLog({ cutoffIso, maxEntries = 500 }) {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const older = await client.query(
+        `delete from security_audit_log where created_at < $1`,
+        [cutoffIso],
+      );
+
+      const overflow = await client.query(
+        `delete from security_audit_log
+         where id in (
+           select id from security_audit_log
+           order by created_at desc, id desc
+           offset $1
+         )`,
+        [maxEntries],
+      );
+
+      await client.query('COMMIT');
+      return { deleted: older.rowCount + overflow.rowCount };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
 }

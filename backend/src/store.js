@@ -3,6 +3,8 @@ import { randomUUID } from 'node:crypto';
 import { InMemoryPriceRepository } from './repositories/price-repository.js';
 import { InMemoryAppRepository } from './repositories/app-repository.js';
 import { generateRecipeSuggestions } from './ai-provider.js';
+import { AuditLogService } from './services/audit-log.service.js';
+import { ReceiptOcrService } from './services/receipt-ocr.service.js';
 
 const DEFAULT_CATEGORY_MAP = [
   { keywords: ['qumesht', 'djath', 'kos'], category: 'Bulmet' },
@@ -87,22 +89,52 @@ export class SmartCartStore {
     this.recipeSuggestionCache = new Map();
     this.flyers = STARTER_FLYERS;
     this.pricingEstimateCache = new Map();
+    this.pricingEstimateInflight = new Map();
+    this.pricingCacheStats = {
+      requests: 0,
+      memoryHits: 0,
+      sharedHits: 0,
+      misses: 0,
+      writes: 0,
+      coalescedRequests: 0,
+      refreshRequests: 0,
+      sharedFailures: 0,
+    };
     this.priceRepository = new InMemoryPriceRepository(STARTER_PRICE_BOOK);
     this.cache = cache;
-  }
-
-  recordSecurityAudit(event) {
-    this.repo.securityAuditLog.push({
-      id: randomUUID(),
-      ...event,
-      createdAt: new Date().toISOString(),
+    this.auditLogService = new AuditLogService({
+      repo: this.repo,
+      coreRepository: this.coreRepository,
+      maxEntries: Number(process.env.AUDIT_LOG_MAX_ENTRIES || 500),
+      retentionDays: Number(process.env.AUDIT_LOG_RETENTION_DAYS || 90),
+      integritySalt: process.env.AUDIT_LOG_INTEGRITY_SALT
+        ?? (process.env.NODE_ENV === 'production' ? null : `dev-${process.pid}-${Date.now()}`),
     });
-    if (this.repo.securityAuditLog.length > 500) this.repo.securityAuditLog.shift();
+    this.receiptOcrService = new ReceiptOcrService({
+      repo: this.repo,
+      assertMember: (...args) => this.assertMember(...args),
+      pushActivity: (...args) => this.pushActivity(...args),
+      recordDbTrace: (...args) => this.repo.recordDbTrace(...args),
+      normalizeReceiptItems: (...args) => this.normalizeReceiptItems(...args),
+      addReceipt: (...args) => this.addReceipt(...args),
+    });
   }
 
-  getSecurityAuditLog({ userId, limit = 100 }) {
-    if (!userId) throw new Error('FORBIDDEN_HOUSEHOLD_ACCESS');
-    return this.repo.securityAuditLog.slice(-Math.max(1, Math.min(500, limit)));
+  async recordSecurityAudit(event) {
+    await this.auditLogService.record(event);
+  }
+
+  async getSecurityAuditLog({ userId, limit = 100 }) {
+    return this.auditLogService.list({ userId, limit });
+  }
+
+
+  async verifySecurityAuditIntegrity() {
+    return this.auditLogService.verifyIntegrity();
+  }
+
+  async pruneSecurityAuditLog(referenceDate = new Date()) {
+    return this.auditLogService.pruneExpired(referenceDate);
   }
 
   ensureUser(userId) {
@@ -338,149 +370,27 @@ export class SmartCartStore {
   }
 
   async enqueueReceiptOcrJob({ userId, householdId, objectKey, apiRequestId = null, traceContext = null }) {
-    await this.assertMember(userId, householdId);
-    const job = {
-      jobId: randomUUID(),
-      householdId,
-      objectKey,
-      status: 'queued',
-      attempts: 0,
-      maxAttempts: 3,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      result: null,
-      error: null,
-      correctedResult: null,
-      trace: {
-        apiRequestId,
-        workerRunId: null,
-        workerStartedAt: null,
-        applyRequestId: null,
-      },
-    };
-    this.repo.receiptOcrJobs.get(householdId).push(job);
-    await this.pushActivity(householdId, userId, 'receipt.ocr.queued', `${userId} nisi OCR job`);
-    this.repo.recordDbTrace({ requestId: traceContext?.requestId, operation: 'insert', entity: 'receipt_ocr_jobs', householdId });
-
-    setTimeout(() => {
-      this.processReceiptOcrJob({ householdId, jobId: job.jobId });
-    }, 20);
-
-    return job;
+    return this.receiptOcrService.enqueue({ userId, householdId, objectKey, apiRequestId, traceContext });
   }
 
   processReceiptOcrJob({ householdId, jobId }) {
-    const jobs = this.repo.receiptOcrJobs.get(householdId) ?? [];
-    const job = jobs.find((entry) => entry.jobId === jobId);
-    if (!job || ['succeeded', 'succeeded_corrected', 'dead_letter'].includes(job.status)) return job;
-
-    job.status = 'processing';
-    job.attempts += 1;
-    job.updatedAt = new Date().toISOString();
-    job.trace.workerRunId = randomUUID();
-    job.trace.workerStartedAt = new Date().toISOString();
-
-    // Simulated OCR engine behavior: object keys containing "fail" will fail.
-    const shouldFail = String(job.objectKey || '').toLowerCase().includes('fail');
-
-    if (shouldFail) {
-      job.error = 'OCR_ENGINE_PARSE_ERROR';
-      if (job.attempts >= job.maxAttempts) {
-        job.status = 'dead_letter';
-      } else {
-        job.status = 'failed';
-      }
-      job.updatedAt = new Date().toISOString();
-      return job;
-    }
-
-    const parsedItems = [
-      { name: 'Qumesht', quantity: 1, unitPrice: 1.2 },
-      { name: 'Buke', quantity: 1, unitPrice: 0.7 },
-    ];
-
-    job.status = 'succeeded';
-    job.result = {
-      store: 'ocr-store',
-      items: parsedItems,
-      total: Number(parsedItems.reduce((sum, item) => sum + item.quantity * item.unitPrice, 0).toFixed(2)),
-    };
-    job.error = null;
-    job.updatedAt = new Date().toISOString();
-    return job;
+    return this.receiptOcrService.process({ householdId, jobId });
   }
 
-  async retryReceiptOcrJob({ userId, householdId, jobId, traceContext = null }) {
-    await this.assertMember(userId, householdId);
-    const jobs = this.repo.receiptOcrJobs.get(householdId) ?? [];
-    const job = jobs.find((entry) => entry.jobId === jobId);
-    if (!job) throw new Error('OCR_JOB_NOT_FOUND');
-    if (!['failed'].includes(job.status)) throw new Error('OCR_JOB_RETRY_NOT_ALLOWED');
-
-    job.status = 'queued';
-    job.updatedAt = new Date().toISOString();
-    await this.pushActivity(householdId, userId, 'receipt.ocr.retried', `${userId} ritriggeroi OCR job`);
-    this.repo.recordDbTrace({ requestId: traceContext?.requestId, operation: 'update', entity: 'receipt_ocr_jobs', householdId });
-
-    setTimeout(() => {
-      this.processReceiptOcrJob({ householdId, jobId: job.jobId });
-    }, 20);
-
-    return job;
+  async retryReceiptOcrJob({ userId, householdId, jobId, replayToken = null, traceContext = null }) {
+    return this.receiptOcrService.retry({ userId, householdId, jobId, replayToken, traceContext });
   }
 
   async listReceiptOcrJobs({ userId, householdId }) {
-    await this.assertMember(userId, householdId);
-    return this.repo.receiptOcrJobs.get(householdId) ?? [];
+    return this.receiptOcrService.list({ userId, householdId });
   }
 
   async correctReceiptOcrJob({ userId, householdId, jobId, store, items, traceContext = null }) {
-    await this.assertMember(userId, householdId);
-    const jobs = this.repo.receiptOcrJobs.get(householdId) ?? [];
-    const job = jobs.find((entry) => entry.jobId === jobId);
-    if (!job) throw new Error('OCR_JOB_NOT_FOUND');
-    if (!['failed', 'dead_letter'].includes(job.status)) throw new Error('OCR_JOB_CORRECTION_NOT_ALLOWED');
-
-    const normalizedItems = this.normalizeReceiptItems(items).map((item) => ({
-      name: item.name,
-      quantity: item.quantity,
-      unitPrice: item.unitPrice,
-    }));
-
-    job.correctedResult = {
-      store,
-      items: normalizedItems,
-      total: Number(normalizedItems.reduce((sum, item) => sum + item.quantity * item.unitPrice, 0).toFixed(2)),
-    };
-    job.status = 'succeeded_corrected';
-    job.updatedAt = new Date().toISOString();
-    await this.pushActivity(householdId, userId, 'receipt.ocr.corrected', `${userId} korrigjoi manualisht OCR job`);
-    this.repo.recordDbTrace({ requestId: traceContext?.requestId, operation: 'update', entity: 'receipt_ocr_jobs', householdId });
-
-    return job;
+    return this.receiptOcrService.correct({ userId, householdId, jobId, store, items, traceContext });
   }
 
   async applyReceiptOcrJobResult({ userId, householdId, jobId, applyRequestId = null, traceContext = null }) {
-    await this.assertMember(userId, householdId);
-    const jobs = this.repo.receiptOcrJobs.get(householdId) ?? [];
-    const job = jobs.find((entry) => entry.jobId === jobId);
-    if (!job) throw new Error('OCR_JOB_NOT_FOUND');
-
-    const source = job.status === 'succeeded_corrected' ? job.correctedResult : job.result;
-    if (!source) throw new Error('OCR_JOB_NOT_READY');
-
-    const result = await this.addReceipt({
-      userId,
-      householdId,
-      store: source.store,
-      items: source.items,
-      traceContext,
-    });
-
-    job.trace.applyRequestId = applyRequestId;
-    await this.pushActivity(householdId, userId, 'receipt.ocr.applied', `${userId} aplikoi OCR rezultatin`);
-    this.repo.recordDbTrace({ requestId: traceContext?.requestId, operation: 'update', entity: 'receipt_ocr_jobs', householdId });
-    return { job, appliedReceipt: result.receipt, budget: result.budget };
+    return this.receiptOcrService.apply({ userId, householdId, jobId, applyRequestId, traceContext });
   }
 
   async listReceipts({ userId, householdId }) {
@@ -639,6 +549,7 @@ export class SmartCartStore {
   promoteStagingPrices({ actorId, traceContext = null }) {
     const result = this.priceRepository.promoteValidated({ actorId });
     this.pricingEstimateCache.clear();
+    this.pricingEstimateInflight.clear();
     this.repo.recordDbTrace({ requestId: traceContext?.requestId, operation: 'promote', entity: 'store_prices_live', householdId: null });
     if (this.cache) void this.cache.delByPrefix('pricing:');
     return result;
@@ -646,14 +557,7 @@ export class SmartCartStore {
 
 
   getOcrQueueDepth() {
-    const jobs = Array.from(this.repo.receiptOcrJobs.values()).flat();
-    return {
-      total: jobs.length,
-      queued: jobs.filter((entry) => entry.status === 'queued').length,
-      processing: jobs.filter((entry) => entry.status === 'processing').length,
-      failed: jobs.filter((entry) => entry.status === 'failed').length,
-      deadLetter: jobs.filter((entry) => entry.status === 'dead_letter').length,
-    };
+    return this.receiptOcrService.getQueueDepth();
   }
 
   getPricingPipelineStatus() {
@@ -666,15 +570,27 @@ export class SmartCartStore {
     for (const entry of this.pricingEstimateCache.values()) {
       if (entry.expiresAt > now) active += 1;
     }
+    const stats = this.pricingCacheStats;
+    const hitCount = stats.memoryHits + stats.sharedHits;
+    const hitRatio = stats.requests ? Number((hitCount / stats.requests).toFixed(4)) : 0;
+    const missRatio = stats.requests ? Number((stats.misses / stats.requests).toFixed(4)) : 0;
     return {
       totalEntries: this.pricingEstimateCache.size,
       activeEntries: active,
+      inflightComputations: this.pricingEstimateInflight.size,
       ttlSec: PRICING_CACHE_TTL_MS / 1000,
+      stats: {
+        ...stats,
+        hitRatio,
+        missRatio,
+      },
     };
   }
 
   async estimatePrices({ userId, householdId, refresh = false }) {
     await this.assertMember(userId, householdId);
+    this.pricingCacheStats.requests += 1;
+    if (refresh) this.pricingCacheStats.refreshRequests += 1;
     const activeItems = (this.repo.listItems.get(householdId) ?? []).filter((item) => !item.purchased);
     const signature = activeItems
       .map((item) => `${this.canonicalizeItemKey(item.name)}:${item.quantity}:${item.version}`)
@@ -685,26 +601,72 @@ export class SmartCartStore {
 
     if (!refresh) {
       if (this.cache) {
-        const redisCached = await this.cache.getJson(`pricing:${cacheKey}`);
-        if (redisCached) {
-          return {
-            ...redisCached,
-            cached: true,
-            cacheTtlSecRemaining: PRICING_CACHE_TTL_MS / 1000,
-          };
+        try {
+          const redisCached = await this.cache.getJson(`pricing:${cacheKey}`);
+          if (redisCached) {
+            this.pricingCacheStats.sharedHits += 1;
+            return {
+              ...redisCached,
+              cached: true,
+              cacheTier: 'shared',
+              cacheTtlSecRemaining: PRICING_CACHE_TTL_MS / 1000,
+            };
+          }
+        } catch {
+          this.pricingCacheStats.sharedFailures += 1;
         }
       }
 
       const cached = this.pricingEstimateCache.get(cacheKey);
       if (cached && cached.expiresAt > now) {
+        this.pricingCacheStats.memoryHits += 1;
         return {
           ...cached.payload,
           cached: true,
+          cacheTier: 'memory',
           cacheTtlSecRemaining: Math.ceil((cached.expiresAt - now) / 1000),
         };
       }
     }
 
+    const existingComputation = this.pricingEstimateInflight.get(cacheKey);
+    if (existingComputation) {
+      this.pricingCacheStats.coalescedRequests += 1;
+      return existingComputation;
+    }
+
+    this.pricingCacheStats.misses += 1;
+
+    const computation = this.computePricingPayload(activeItems)
+      .then(async (payload) => {
+        const expiresAt = Date.now() + PRICING_CACHE_TTL_MS;
+        this.pricingEstimateCache.set(cacheKey, { payload, expiresAt });
+        this.pricingCacheStats.writes += 1;
+
+        if (this.cache) {
+          try {
+            await this.cache.setJson(`pricing:${cacheKey}`, payload, PRICING_CACHE_TTL_MS / 1000);
+          } catch {
+            this.pricingCacheStats.sharedFailures += 1;
+          }
+        }
+
+        return {
+          ...payload,
+          cached: false,
+          cacheTier: 'origin',
+          cacheTtlSecRemaining: PRICING_CACHE_TTL_MS / 1000,
+        };
+      })
+      .finally(() => {
+        this.pricingEstimateInflight.delete(cacheKey);
+      });
+
+    this.pricingEstimateInflight.set(cacheKey, computation);
+    return computation;
+  }
+
+  async computePricingPayload(activeItems) {
     const totals = Object.entries(this.priceRepository.getPriceBook())
       .map(([store, prices]) => {
         const subtotal = activeItems.reduce((sum, item) => {
@@ -716,22 +678,10 @@ export class SmartCartStore {
       })
       .sort((a, b) => a.total - b.total);
 
-    const payload = {
+    return {
       bestStore: totals[0]?.store ?? null,
       totals,
       itemCount: activeItems.length,
-    };
-
-    this.pricingEstimateCache.set(cacheKey, {
-      payload,
-      expiresAt: now + PRICING_CACHE_TTL_MS,
-    });
-    if (this.cache) await this.cache.setJson(`pricing:${cacheKey}`, payload, PRICING_CACHE_TTL_MS / 1000);
-
-    return {
-      ...payload,
-      cached: false,
-      cacheTtlSecRemaining: PRICING_CACHE_TTL_MS / 1000,
     };
   }
 
@@ -888,6 +838,9 @@ export class SmartCartStore {
   async clearPricingCacheForHousehold(householdId) {
     for (const key of this.pricingEstimateCache.keys()) {
       if (key.startsWith(`${householdId}:`)) this.pricingEstimateCache.delete(key);
+    }
+    for (const key of this.pricingEstimateInflight.keys()) {
+      if (key.startsWith(`${householdId}:`)) this.pricingEstimateInflight.delete(key);
     }
     if (this.cache) await this.cache.delByPrefix(`pricing:${householdId}:`);
   }

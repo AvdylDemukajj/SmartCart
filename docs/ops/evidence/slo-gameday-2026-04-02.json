@@ -1,0 +1,50 @@
+{"requestId":"0c3cc7b2-b2cf-4143-9156-01b2dc0a33ff","method":"POST","path":"/households","userId":"gameday-user","status":201,"error":null,"ts":"2026-04-02T14:23:42.661Z"}
+{"requestId":"729b509f-9b05-4d8e-ac61-df9e15fb7c05","method":"POST","path":"/households/48c39e63-1326-40f4-86c4-d2282e4e821d/items","userId":"gameday-user","status":201,"error":null,"ts":"2026-04-02T14:23:42.700Z"}
+{"requestId":"e9f994d8-8796-4ba4-8291-6bdd19f67a9a","method":"POST","path":"/households/48c39e63-1326-40f4-86c4-d2282e4e821d/items","userId":"gameday-user","status":201,"error":null,"ts":"2026-04-02T14:23:42.708Z"}
+{"requestId":"828c1d18-72b6-4664-9f67-b4be0e62c208","method":"POST","path":"/households/48c39e63-1326-40f4-86c4-d2282e4e821d/items","userId":"gameday-user","status":201,"error":null,"ts":"2026-04-02T14:23:42.717Z"}
+{"requestId":"02c212a0-9665-4a0b-ae27-63a89ec6876b","method":"POST","path":"/households/48c39e63-1326-40f4-86c4-d2282e4e821d/items","userId":"gameday-user","status":201,"error":null,"ts":"2026-04-02T14:23:42.724Z"}
+{"requestId":"2a7cf8e6-6e2f-408a-afeb-534e10f99b71","method":"POST","path":"/households/48c39e63-1326-40f4-86c4-d2282e4e821d/items","userId":"gameday-user","status":201,"error":null,"ts":"2026-04-02T14:23:42.731Z"}
+{"requestId":"992c9737-11de-4508-a651-05190e96c51f","method":"POST","path":"/households/48c39e63-1326-40f4-86c4-d2282e4e821d/items","userId":"gameday-user","status":201,"error":null,"ts":"2026-04-02T14:23:42.736Z"}
+{"requestId":"ec028db1-b7c0-440f-bc8d-b91dfb3fbfe4","method":"POST","path":"/households/48c39e63-1326-40f4-86c4-d2282e4e821d/items","userId":"gameday-user","status":201,"error":null,"ts":"2026-04-02T14:23:42.742Z"}
+{"requestId":"2c495675-3345-4734-bc7a-edda17132b7a","method":"POST","path":"/households/48c39e63-1326-40f4-86c4-d2282e4e821d/items","userId":"gameday-user","status":201,"error":null,"ts":"2026-04-02T14:23:42.762Z"}
+{"requestId":"980a2891-657c-42fe-96c1-383a58dc2116","method":"POST","path":"/households/48c39e63-1326-40f4-86c4-d2282e4e821d/items","userId":"gameday-user","status":201,"error":null,"ts":"2026-04-02T14:23:42.770Z"}
+{"requestId":"16f04c3f-9884-449d-bf39-450b45d34140","method":"POST","path":"/households/48c39e63-1326-40f4-86c4-d2282e4e821d/items","userId":"gameday-user","status":201,"error":null,"ts":"2026-04-02T14:23:42.774Z"}
+{"requestId":"4ba080df-174e-439c-a7f6-65dfeb9692f8","method":"POST","path":"/households/48c39e63-1326-40f4-86c4-d2282e4e821d/items","userId":"gameday-user","status":201,"error":null,"ts":"2026-04-02T14:23:42.777Z"}
+{"requestId":"82e177f0-bd0d-45b4-af15-9152def3fae4","method":"POST","path":"/households/48c39e63-1326-40f4-86c4-d2282e4e821d/items","userId":"gameday-user","status":201,"error":null,"ts":"2026-04-02T14:23:42.779Z"}
+{"requestId":"2544ac50-9695-4dce-9bff-4ab65c5b3273","method":"POST","path":"/households/48c39e63-1326-40f4-86c4-d2282e4e821d/items","userId":"gameday-user","status":201,"error":null,"ts":"2026-04-02T14:23:42.781Z"}
+{"requestId":"61236aa2-f1e2-4847-982f-0487d93de0fc","method":"POST","path":"/households/48c39e63-1326-40f4-86c4-d2282e4e821d/items","userId":"gameday-user","status":201,"error":null,"ts":"2026-04-02T14:23:42.784Z"}
+{"requestId":"731259cb-a8f5-42e5-800b-eba9697b9602","method":"POST","path":"/households/48c39e63-1326-40f4-86c4-d2282e4e821d/items","userId":"gameday-user","status":201,"error":null,"ts":"2026-04-02T14:23:42.787Z"}
+{"requestId":"bd8cc22e-992e-46dc-a635-10411ccccd18","method":"GET","path":"/households/48c39e63-1326-40f4-86c4-d2282e4e821d/pricing/estimate","userId":"gameday-user","status":200,"error":null,"ts":"2026-04-02T14:23:42.794Z"}
+{"requestId":"54a3d3c8-cddb-422a-bf9f-76671de265ce","method":"GET","path":"/households/48c39e63-1326-40f4-86c4-d2282e4e821d/pricing/estimate","userId":"gameday-user","status":200,"error":null,"ts":"2026-04-02T14:23:42.798Z"}
+{"requestId":"ae3cde79-7979-40ee-87bd-5873f65f8166","method":"GET","path":"/households/48c39e63-1326-40f4-86c4-d2282e4e821d/pricing/estimate","userId":"gameday-user","status":200,"error":null,"ts":"2026-04-02T14:23:42.800Z"}
+{"requestId":"c860d656-a414-48d5-a8a1-aa06ea00064c","method":"GET","path":"/households/48c39e63-1326-40f4-86c4-d2282e4e821d/pricing/estimate","userId":"gameday-user","status":200,"error":null,"ts":"2026-04-02T14:23:42.805Z"}
+{"requestId":"ccfbdded-cb3c-4345-8755-a95a4989f24d","method":"GET","path":"/households/48c39e63-1326-40f4-86c4-d2282e4e821d/pricing/estimate","userId":"gameday-user","status":200,"error":null,"ts":"2026-04-02T14:23:42.807Z"}
+{"requestId":"9342fee3-485e-4cb8-9bac-444434c4baf1","method":"GET","path":"/households/48c39e63-1326-40f4-86c4-d2282e4e821d/pricing/estimate","userId":"gameday-user","status":200,"error":null,"ts":"2026-04-02T14:23:42.810Z"}
+{"requestId":"d5d4474e-fa58-4cb1-b763-bbcc29389d82","method":"GET","path":"/households/48c39e63-1326-40f4-86c4-d2282e4e821d/pricing/estimate","userId":"gameday-user","status":200,"error":null,"ts":"2026-04-02T14:23:42.813Z"}
+{"requestId":"e0f8c8e8-2e47-4c35-a55f-dcfc9a69f9c0","method":"GET","path":"/households/48c39e63-1326-40f4-86c4-d2282e4e821d/pricing/estimate","userId":"gameday-user","status":200,"error":null,"ts":"2026-04-02T14:23:42.821Z"}
+{"requestId":"7c33d4bb-f98c-4aa5-8eef-d24d24127645","method":"GET","path":"/households/48c39e63-1326-40f4-86c4-d2282e4e821d/pricing/estimate","userId":"gameday-user","status":200,"error":null,"ts":"2026-04-02T14:23:42.823Z"}
+{"requestId":"aab48ec3-e599-466b-9adf-9e3917f186bc","method":"GET","path":"/households/48c39e63-1326-40f4-86c4-d2282e4e821d/pricing/estimate","userId":"gameday-user","status":200,"error":null,"ts":"2026-04-02T14:23:42.829Z"}
+{"requestId":"986b9f87-5bb0-4a33-b4b4-ddb869714320","method":"GET","path":"/households/48c39e63-1326-40f4-86c4-d2282e4e821d/pricing/estimate","userId":"gameday-user","status":200,"error":null,"ts":"2026-04-02T14:23:42.831Z"}
+{"requestId":"06681e4b-add0-448b-920a-c7d2b4d80c6c","method":"GET","path":"/households/48c39e63-1326-40f4-86c4-d2282e4e821d/pricing/estimate","userId":"gameday-user","status":200,"error":null,"ts":"2026-04-02T14:23:42.832Z"}
+{"requestId":"46775e21-23dd-4598-9afd-fe05b1ab78de","method":"GET","path":"/households/48c39e63-1326-40f4-86c4-d2282e4e821d/pricing/estimate","userId":"gameday-user","status":200,"error":null,"ts":"2026-04-02T14:23:42.835Z"}
+{"requestId":"d95a97c2-9118-4ba8-9aba-1eea6cc74208","method":"GET","path":"/households/48c39e63-1326-40f4-86c4-d2282e4e821d/pricing/estimate","userId":"gameday-user","status":200,"error":null,"ts":"2026-04-02T14:23:42.837Z"}
+{"requestId":"9ebc3b45-1f6d-459f-8d9e-f450e7de3b56","method":"GET","path":"/households/48c39e63-1326-40f4-86c4-d2282e4e821d/pricing/estimate","userId":"gameday-user","status":200,"error":null,"ts":"2026-04-02T14:23:42.839Z"}
+{"requestId":"7e9963c2-eb35-4a3d-ad98-48ad4f4e38ac","method":"GET","path":"/metrics","userId":null,"status":200,"error":null,"ts":"2026-04-02T14:23:42.842Z"}
+{
+  "startedAt": "2026-04-02T14:23:42.596Z",
+  "finishedAt": "2026-04-02T14:23:42.844Z",
+  "sampleCount": 31,
+  "syntheticP95Ms": 23.35,
+  "metricsP95Ms": 5.13,
+  "error5xxRate": 0,
+  "thresholds": {
+    "syntheticP95MsMax": 250,
+    "metricsP95MsMax": 500,
+    "error5xxRateMax": 0.01
+  },
+  "pass": true,
+  "notes": [
+    "Synthetic gameday smoke over key write/read paths.",
+    "Use this as evidence artifact; run in staging for production gate."
+  ]
+}

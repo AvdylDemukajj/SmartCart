@@ -1,0 +1,27 @@
+{
+  "startedAt": "2026-04-03T12:16:11.143Z",
+  "finishedAt": "2026-04-03T12:16:11.182Z",
+  "pass": true,
+  "scenarios": [
+    {
+      "name": "db_unavailable",
+      "pass": true,
+      "detail": "PERSISTENT_STORE_REQUIRED"
+    },
+    {
+      "name": "redis_partition_strict",
+      "pass": true,
+      "detail": "REDIS_UNAVAILABLE_IN_STRICT_MODE"
+    },
+    {
+      "name": "network_partition_connection_reset",
+      "pass": true,
+      "detail": "TypeError"
+    }
+  ],
+  "notes": [
+    "Chaos drill validates failure-mode guardrails and recovery behavior.",
+    "Network partition simulation is local and deterministic (connection reset).",
+    "Run this in CI/nightly and keep evidence artifacts for readiness reviews."
+  ]
+}
