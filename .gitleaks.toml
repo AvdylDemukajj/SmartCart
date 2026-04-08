@@ -1,0 +1,16 @@
+title = "SmartCart Gitleaks Config"
+
+[allowlist]
+description = "Allow known non-secret evidence/test artifacts"
+paths = [
+  '''docs/ops/evidence/.*\.json''',
+  '''docs/release/.*\.md''',
+  '''backend/test/.*\.test\.js'''
+]
+
+# Allow deterministic placeholders used in tests/dev docs only.
+regexes = [
+  '''dev-secret''',
+  '''Bearer dev-user:''',
+  '''PERSISTENT_STORE_REQUIRED'''
+]
