@@ -8,7 +8,7 @@ const DATABASE_URL = process.env.DATABASE_URL;
 const ROOT = path.resolve(import.meta.dirname, '..');
 
 async function applyMigrations(repository) {
-  const files = ['0001_initial.sql', '0002_rls_and_security.sql', '0003_schema_parity_and_rls.sql', '0004_list_items_version.sql'];
+  const files = ['0001_initial.sql', '0002_rls_and_security.sql', '0003_schema_parity_and_rls.sql', '0004_list_items_version.sql', '0005_security_audit_log.sql'];
   for (const file of files) {
     const sql = await readFile(path.join(ROOT, 'db/migrations', file), 'utf8');
     await repository.pool.query(sql);
